@@ -115,7 +115,7 @@ minoverlap=0.75 #This is the minimum overlap needed for a BIN to match to an OTU
 # below refers to a spreadsheet column by number. Columns may be added, removed
 # or reordered in either tab without touching a line of code.
 #
-#   * RENAMED a column in the spreadsheet?  Change its value here. Nothing else.
+#   * RENAMED a column in the spreadsheet?  Change its value here.
 #   * ADDED a column?                       Add a COLNAME_*/DICTCOL_* line here,
 #                                           then use $COL_<NAME> where you need it.
 
@@ -1283,7 +1283,7 @@ fi
 # Sanitize and validate the dictionary file
 # ---------------------------
 
-dictfile="$scripts_directory/dictionary_BIP.tsv"
+dictfile="$wkdir/dictionary_BIP.tsv"
 
 # ---------------------------
 # Merge Dictionary tab from Excel into local dictionary file
@@ -1311,7 +1311,7 @@ dict_cols = [os.environ[k] for k in (
 fwd_name, rev_name = dict_cols[0], dict_cols[1]
 
 # A misnamed tab used to be swallowed here, leaving the dictionary silently
-# empty and failing much later with a confusing "primer pair not found". 
+# empty and failing much later with a "primer pair not found". 
 xl = pd.ExcelFile(param_file)
 if sheet in xl.sheet_names:
     df_new = pd.read_excel(param_file, sheet_name=sheet)
@@ -1703,8 +1703,7 @@ awk -F'\t' -v cfp="$COL_FWD_PRIMER" -v crp="$COL_REV_PRIMER" 'NR>1 {print $cfp "
 | sort -u > "$primer_list"
 
 # Join with dictionary.tsv → primer_sequences.tsv
-# (dictionary columns resolved by name; primer_list is generated above and is
-#  always fwd-name <tab> rev-name)
+# (dictionary columns resolved by name; primer_list is generated above and is always fwd-name <tab> rev-name)
 awk -F'\t' -v OFS='\t' \
     -v dk1="$DCOL_FWD_NAME" -v dk2="$DCOL_REV_NAME" \
     -v dfs="$DCOL_FWD_SEQ"  -v drs="$DCOL_REV_SEQ" '
@@ -1941,8 +1940,7 @@ log_step "Total" "$START_LABEL" "$END_LABEL" $(( END_TIME - START_TIME ))
 
 mkdir -m 777 "$runid"_results
 
-# Leave the original raw input files (fastq(.gz) and the params xlsx) in place
-sweep_excludes=(! -name . ! -name "${runid}_results" ! -name "$param_file")
+sweep_excludes=(! -name . ! -name "${runid}_results" ! -name "$param_file" ! -name "$(basename "$dictfile")" ! -name "compose.yaml")
 for f in "${fastq_files[@]}"; do
     sweep_excludes+=(! -name "$f")
 done
