@@ -1,0 +1,29 @@
+BIP Run Parameters
+==================
+Run ID:             BAI
+Date:               2026-07-17
+
+Command line arguments
+----------------------
+Platform:           nanopore
+Min reads:          2
+
+Primer pair parameters
+----------------------
+Forward Primer Name	Reverse Primer Name	Forward Primer Sequence	Reverse Primer Sequence	Marker	Reference Library	Min amplicon length	Max amplicon length	Target amplicon length	Primary OTU clustering threshold	Secondary OTU clustering threshold	Tax assign probability threshold	BIN assign threshold
+C_LepFolF	C_LepFolR	RKTCAACMAATCATAAAGATATTGG	TAAACTTCWGGRTGWCCAAAAAATCA	COI-5P	BOLDistilled_COI_Apr2026	550	950	658	0.95	0.97	0.6	0.97
+
+Software versions
+-----------------
+vsearch:            vsearch v2.30.4_linux_aarch64, 7.8GB RAM, 10 cores
+cutadapt:           5.2
+seqtk:              1.5-r133
+python3:            Python 3.11.15
+R:                  R version 4.5.2 (2025-10-31) -- "[Not] Part in a Rumble"
+
+System
+------
+OS:                 Linux 6.12.76-linuxkit
+CPU:                
+RAM:                8 GB
+CPU threads:        7 (of 10 available)

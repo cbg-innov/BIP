@@ -1,0 +1,14 @@
+#make BOLDdistilled lib persist.
+
+services:
+  bip:
+    build:
+      context: .
+    image: ghcr.io/cbg-innov/bip:latest
+    working_dir: /BIP
+    volumes:
+      - reflib:/BIP/REFS
+      - ${BIP_DATA:-./data}:/data
+    command: ["sleep", "infinity"]
+volumes:
+  reflib:

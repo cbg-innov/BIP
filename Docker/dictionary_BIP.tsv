@@ -1,0 +1,3 @@
+Forward Primer Name	Reverse Primer Name	Forward Primer Sequence	Reverse Primer Sequence	Marker	Reference Library	Min amplicon length	Max amplicon length	Target amplicon length	Primary OTU clustering threshold	Secondary OTU clustering threshold	Tax assign probability threshold	BIN assign threshold
+28S_D2F	28S_D2R	AGTCGTGTTGCTTGATAGTGCAG	TTGGTCCGTGTTTCAAGACGGG	28S	BOLD_28S_Jul2026_sintax	470	870	574	0.95	0.95	0.6	0.97
+C_LepFolF	C_LepFolR	RKTCAACMAATCATAAAGATATTGG	TAAACTTCWGGRTGWCCAAAAAATCA	COI-5P	BOLDistilled_COI_Apr2026	550	950	658	0.95	0.97	0.6	0.97

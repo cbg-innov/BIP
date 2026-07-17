@@ -1,0 +1,4 @@
+>ATAGCGACGCGATATA
+TATATCGCGTCGCTAT;min_overlap=12;max_error_rate=0.125
+>TCTCTCGATATGATAG
+CTATCATATCGAGAGA;min_overlap=12;max_error_rate=0.125

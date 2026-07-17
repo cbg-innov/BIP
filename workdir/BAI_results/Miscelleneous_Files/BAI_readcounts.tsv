@@ -1,0 +1,9 @@
+runid	stage	primer_pair	reads
+BAI	Raw	ALL	1760
+BAI	PrimerSplit	C_LepFolF_C_LepFolR	1549
+BAI	LengthFilter	C_LepFolF_C_LepFolR	1495
+BAI	LinkedUMI	C_LepFolF_C_LepFolR	1048
+BAI	AfterChimRemovalOrDerep	C_LepFolF_C_LepFolR	
+BAI	AfterOTUClustering	C_LepFolF_C_LepFolR	951
+BAI	ReadsInOTUs	C_LepFolF_C_LepFolR	951
+BAI	ReadsInTargetBarcodes	C_LepFolF_C_LepFolR	436
