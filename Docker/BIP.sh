@@ -911,9 +911,15 @@ process_primer_dir() {
     # Sum after chimera read counts and remove temporary files
     # ---------------------------
 
-    chimerareadcount=$(awk '{s+=$1} END{print s}' *_afterchimerareadcount.tmp)
+    # Collect into an array and guard so an empty marker reports 0 instead.
+    chimera_tmps=(*_afterchimerareadcount.tmp)
+    if (( ${#chimera_tmps[@]} )); then
+        chimerareadcount=$(awk '{s+=$1} END{print s+0}' "${chimera_tmps[@]}")
+        rm -f "${chimera_tmps[@]}"
+    else
+        chimerareadcount=0
+    fi
     echo -e "${runid}\tAfterChimRemovalOrDerep\t${name}\t${chimerareadcount}" >> "$counts_file"
-    rm *_afterchimerareadcount.tmp
 
     # delete any OTU component read or OTU consensus read files that are empty
     find ./ -name "*.fas" -size 0 -delete
@@ -934,10 +940,20 @@ process_primer_dir() {
     rename 's/tmp/fasta/g' *finalOTUs.tmp
     rename 's/finalOTUs/OTUs/g' *finalOTUs.fasta
 
-    # merge all OTUs into a single file
+    # merge all OTUs into a single file, including 'empty barcode' samples
     echo -e "******** Merging all OTU consensus sequences into a single FASTA file"
-    cat *OTUs.fasta > "$runid".fasta
-    rm *OTUs.fasta
+    otu_files=(*OTUs.fasta)
+    if (( ${#otu_files[@]} == 0 )); then
+        echo "WARNING: no OTUs remaining for ${name}; skipping downstream steps for this marker"
+        echo -e "${runid}\tAfterOTUClustering\t${name}\t0" >> "$counts_file"
+        echo -e "${runid}\tReadsInOTUs\t${name}\t0" >> "$counts_file"
+        echo -e "${runid}\tReadsInTargetBarcodes\t${name}\t0" >> "$counts_file"
+        echo "Finished $name"
+        cd "$startdir" || exit 1
+        return 0
+    fi
+    cat "${otu_files[@]}" > "$runid".fasta
+    rm -f "${otu_files[@]}"
 
     otucount=$(
         awk '

@@ -130,7 +130,7 @@ output$merge_key <- NULL  # drop the temp column after merging
 ###########################################################################################################################
 ###########################################################################################################################
 
-known.non.targets <- c("Bacteria", "Fungi", "Protista", "Nematoda", "Heterokontophyta", "Rhodophyta")
+# Non-target status is derived from the taxonomy in the parameters file provided by user
 
 #flag OTUs that have taxonomic mismatches or are unknown
 compute_rank_match <- function(seq_rank, user_rank) {
@@ -258,18 +258,16 @@ output <- data.frame(output %>%
 
 # select the target barcode sequence (if possible)
 if(marker == "TRUE"){
-  output$OTUDestination <- ifelse(output$Phylum %in% known.non.targets | output$Kingdom %in% known.non.targets, "NTS",
-                                     ifelse(output$Kingdom == "unknown", "NTS",
-                                              ifelse(output$OTUCategory != "mtCOI", "NTS",
-                                                   ifelse(output$Tax_Match == "MISMATCH", "NTS",
-                                                          ifelse(output$Ns / output$SeqLength > 0.01, "NTS",
-                                                                 "target")))))
+  output$OTUDestination <- ifelse(output$Kingdom == "unknown", "NTS",
+                                       ifelse(output$OTUCategory != "mtCOI", "NTS",
+                                            ifelse(output$Tax_Match == "MISMATCH", "NTS",
+                                                   ifelse(output$Ns / output$SeqLength > 0.01, "NTS",
+                                                          "target"))))
 } else{
-  output$OTUDestination <- ifelse(output$Phylum %in% known.non.targets | output$Kingdom %in% known.non.targets, "NTS",
-                                ifelse(output$Kingdom == "unknown", "NTS",
+  output$OTUDestination <- ifelse(output$Kingdom == "unknown", "NTS",
                                        ifelse(output$Tax_Match == "MISMATCH", "NTS",
                                               ifelse(output$Ns / output$SeqLength > 0.01, "NTS",
-                                                     "target"))))
+                                                     "target")))
 }
 
 output <- output %>%

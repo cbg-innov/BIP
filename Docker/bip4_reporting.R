@@ -25,11 +25,8 @@ params <- read.table(file.path(wkdir, "parameters.tsv"),
                      header = TRUE, sep = "\t",
                      stringsAsFactors = FALSE, check.names = FALSE)
 
-# parameters.tsv has one row per WELL and covers EVERY primer pair, so a sample run
-# under two markers appears twice - on two different plates. Sample alone is therefore
-# NOT a unique key here: joining on it fans out and cross-contaminates the markers
-# (a COI OTU would be attributed to the sample's 28S plate as well). The real key is
-# Sample + primer_pair, so carry the primer pair alongside every sample.
+# parameters.tsv has one row per WELL and covers EVERY primer pair.
+# Sample + primer_pair, so carry the primer pair alongside every sample to indicate unique wells.
 params$primer_pair <- paste(params[["Forward Primer Name"]],
                             params[["Reverse Primer Name"]], sep = "_")
 
@@ -91,11 +88,6 @@ stage_labels <- c(
 rc <- readcounts %>% filter(stage %in% stage_order)
 rc$stage <- factor(rc$stage, levels = stage_order)
 
-# Raw reads are logged once, as primer_pair = "ALL": before primer splitting a read
-# is not attributable to any marker (and here 14% of them go on to match neither).
-# So the Raw bar is drawn as ONE neutral bar rather than being split across the
-# primer pairs. It used to be divided equally (reads / n_pp), which produced a
-# 50/50 stack that looked like a measurement but was pure fabrication.
 primer_pairs <- unique(rc$primer_pair[rc$primer_pair != "ALL"])
 n_pp <- length(primer_pairs)
 
@@ -118,9 +110,7 @@ pp_colours <- setNames(
   if (n_pp <= length(custom_palette)) custom_palette[seq_len(n_pp)] else hue_pal()(n_pp),
   primer_pairs
 )
-# Raw/unassigned bar: a dark green carried at low opacity, so it reads as present
-# but recessive next to the saturated per-primer bars. Alpha is baked into the hex
-# (RRGGBBAA) rather than set via alpha= so it applies only to this fill.
+# Raw/unassigned bar
 pp_colours["ALL"] <- "#2E7D3259"
 
 # Order the legend so the primer pairs come first and "ALL" (raw, unassigned) last
@@ -210,11 +200,7 @@ plot3 <- ggplot(otus_hist, aes(x = factor(bin_otus, levels = otu_labels), y = Fr
 # ============================================================
 
 # Denominator: non-control samples per plate PER primer pair, taken straight from
-# the parameters file (not the OTU results). Sourcing this from params is what makes
-# EVERY plate assigned to a primer set appear in that primer's facet — including
-# plates that produced no target barcodes, or no reads at all. Those simply show a
-# 0% bar. Counting per (Plate, primer_pair) also stops a plate shared across two
-# markers from lending its full sample count to both facets.
+# the parameters file (not the OTU results).
 plate_primer_totals <- params %>%
   filter(!Sample %in% ctrl_samples) %>%
   group_by(Plate, primer_pair) %>%
@@ -290,11 +276,10 @@ plate_layout <- params %>%
 well_rows <- LETTERS[1:which(LETTERS == max(plate_layout$WellRow))]
 well_cols <- sprintf("%02d", 1:max(as.integer(plate_layout$WellCol)))
 
-# Aggregate OTU reads per sample, PER MARKER (summing across markers would show a
-# shared sample's combined COI+28S total on both of its wells).
+# Aggregate OTU reads per sample, PER MARKER.
 # The .NTS[0-9]+ suffix is stripped as well, so secondary OTUs are counted under
 # their parent sample - without it those rows never match plate_layout and their
-# reads vanish from the heatmap (cf. sample_stats, which already does this).
+# reads vanish from the heatmap.
 reads_per_sample_all <- otu_all %>%
   mutate(Sample = sub("\\.NTS[0-9]+$", "", sub("__.*$", "", Sample))) %>%
   group_by(Sample, primer_pair) %>%
@@ -343,9 +328,7 @@ primer_success_df <- otu_all %>%
   mutate(
     Metric = paste0("Barcode success rate (", primer_pair, ")"),
     # pmax(), not max(): TotalSamples is a column here, one row per primer pair.
-    # max() collapses it to a single scalar - the largest denominator across ALL
-    # primer pairs - so every primer's success rate got divided by the biggest
-    # primer's sample count.
+    # max() collapses it to a single scalar - the largest denominator across ALL primer pairs.
     Value  = paste0(round(WithTarget / pmax(TotalSamples, 1) * 100, 0), "%")
   ) %>%
   select(Metric, Value) %>%

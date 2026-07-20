@@ -601,9 +601,6 @@ for qry_record in qry_seq_list:
                 edited_name = edited_name + '|indel'
     
             else:
-                # The edits we made corrected stops/indels.
-                # The original, un-edited sequence will still go to the standard output file, with "check" added to the header.
-                # The edited version goes to a separate fasta file ("uncertain_edits.fasta"). Optionally, users can decide whether they want to accept these.
                  
                 non_hp_autocorrect_count += 1
                 non_hp_edit = True
