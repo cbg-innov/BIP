@@ -66,7 +66,7 @@ docker run hello-world                      # verify, no sudo
 
 ## Quick start
 
-Change directory to a working directory containing your `.fastq.gz`, parameters `.xlsx`, and `compose.yaml`. Start by downloading the three files small demo dataset included in the BIP repo's `workdir/` directory (`BAI109_demo.fastq.gz` + `parameters.xlsx` + `compose.yaml`), before using real data. Navigate to a new working directory with the files copied and edited as needed, but replace the `fastq.gz` with your own data. Now you are ready to run BIP!
+Change directory to a working directory containing your `.fastq.gz`, parameters `.xlsx`, and `compose.yaml`. Start by downloading the three files in the small demo dataset included in the BIP repo's `workdir/` directory (`BAI109_demo.fastq.gz` + `parameters.xlsx` + `compose.yaml`), before using real data. Navigate to a new working directory with the files copied and edited as needed, but replace the `fastq.gz` with your own data. Now you are ready to run BIP!
 
 **Pull the image:**
 ```bash
@@ -83,7 +83,7 @@ BIP_DATA="$(pwd)" docker compose -f /path/to/Docker/compose.yaml run --rm \
   bip bash /BIP/SCRIPTS/BIP.sh --platform nanopore --minreads 2 <RunName>
 ```
 
-Results land in `./<RunName>_results/` inside your working directory. Your original `.fastq.gz`, `.xlsx`, and a persistent `dictionary_BIP.tsv` are left in place at the top level — they are not moved or archived, so you can rerun without re-copying anything.
+Results land in `./<RunName>_results/` inside your working directory. Your original `.fastq.gz`, `.xlsx`, and a persistent `dictionary_BIP.tsv` are not moved or archived, so you can rerun without re-copying anything.
 
 ---
 
@@ -95,8 +95,24 @@ Same command as above — there are no `--fastq`/`--params` flags. BIP finds its
 - `--minreads N` (default `5`) sets a floor for per-well OTU retention.
 - The last argument is the run name you wish to provide, which is essential for naming outputs.
 - `wkdir` (working directory), `scripts_directory`, and `reference_library_directory` are environment variables, not flags — set via `-e` on `docker compose run`, as shown above. Their in-container defaults are `/BIP/Barcoding`, `/BIP/SCRIPTS`, and `/BIP/REFS`.
+- For Illumina paired-end data, set `--platform illumina_pe`; BIP merges R1/R2 with `PEAR` before proceeding.
 
-For Illumina paired-end data, set `--platform illumina_pe`; BIP merges R1/R2 with `PEAR` before proceeding.
+Use with custom advanced parameters (e.g., change chimera_mindiv):
+```bash
+BIP_DATA="$(pwd)" docker compose -f /path/to/Docker/compose.yaml run --rm \
+  -e wkdir=/data \
+  bip bash /BIP/SCRIPTS/BIP.sh --platform nanopore --minreads 2 <RunName> --chimera_mindiv 0.001
+```
+
+To use your local directory with reference files, run and mount the reference directory (e.g., ~/Desktop/REFS):
+
+``` bash
+BIP_DATA="$(pwd)" docker compose -f /path/to/Docker/compose.yaml run --rm \
+  -e wkdir=/data \
+  -v ~/Desktop/REFS:/myrefs \
+  bip bash /BIP/SCRIPTS/BIP.sh --platform nanopore --minreads 2 --refs /myrefs <RunName>
+```
+
 
 ---
 
@@ -144,7 +160,7 @@ The parameters spreadsheet (`.xlsx`) has three tabs: `Instructions`, `UMIs and P
 | **Forward / Reverse Primer Name** | Name referenced in the `UMIs and Primers` tab |
 | **Forward / Reverse Primer Sequence** | The actual primer sequence (5' to 3')|
 | **Marker** | Locus name (e.g., `COI-5P` for the COI barcode region, anything else for all other markers) |
-| **Reference Library** | Prefix of a SINTAX-formatted `.fasta` in `REFS/` (e.g., `BOLDistilled_COI_Apr2026` is fine for referring to `BOLDistilled_COI_Apr2026_SEQUENCES_sintax.fasta`). Must be an unambiguous prefix — if another file in `REFS/` shares it, the run fails with a "multiple files match" error. |
+| **Reference Library** | Prefix of a SINTAX-formatted `.fasta` in `REFS/` (e.g., `BOLDistilled_COI_Apr2026` is fine for referring to `BOLDistilled_COI_Apr2026_SEQUENCES_sintax.fasta`). Must be an unambiguous prefix. If another file in `REFS/` shares it, the run fails with a "multiple files match" error. |
 | **Min / Max amplicon length** | Length filter, applied with UMIs and primers still attached |
 | **Target amplicon length** | Expected clean amplicon length (no primers/UMIs) |
 | **Primary / Secondary OTU clustering threshold** | vsearch clustering identity thresholds (within-well, then across-run) |
@@ -155,8 +171,26 @@ Entries here are merged into a persistent `dictionary_BIP.tsv` in your working d
 
 ### Advanced tuning
 
-A handful of parameters (UMI/primer overlap minimums, per-base error tolerances, the satellite-OTU read-count floor, core count) are set as constants near the top of `BIP.sh` rather than exposed as flags. Edit them directly in the script if you need to change them.
-
+A handful of parameters (UMI/primer overlap minimums, per-base error tolerances, the satellite-OTU read-count floor, core count) are editable as flags. 
+| Flag | Default | Description |
+|---|---|---|
+| `--platform` | *(required)* | `illumina_pe`, `pacbio`, `nanopore`, or `other`. Determines whether R1/R2 are merged with `PEAR` and whether chimera screening runs early (per-sample) or late (post-clustering). |
+| `--minreads` | `5` | OTUs below this per-sample read count are discarded during clustering. |
+| `--wd` | `/BIP/Barcoding` | Working directory — where BIP looks for the input `.fastq.gz`/`.xlsx` and writes `<RunName>_results/`. |
+| `--scripts` | `/BIP/SCRIPTS` | Directory containing `BIP.sh`'s companion `bip1`-`bip4` R/Python scripts. |
+| `--refs` | `/BIP/REFS` | Reference library directory - searched for both the SINTAX taxonomy reference and the error-correction reference (`reference_seqs_*.fasta`). |
+| `--ref_seq_corr` | *(auto-detect)* | Explicit path to the error-correction reference FASTA. Leave unset to auto-detect the single `reference_seqs_*.fasta` in `--refs`. |
+| `--cores_to_leave` | `3` | How many CPU cores to leave free. BIP will use the rest. |
+| `--umi_overlap_min` | `0.75` | Multiplier applied to UMI lengths during demultiplexing. Recommended: 0.75 for UMIs >=12 nt, 1.0 for UMIs <12 nt. |
+| `--primer_overlap_min` | `0.75` | Multiplier applied to primer lengths during demultiplexing. |
+| `--error_umi1` / `--error_umi2` | `0.125` / `0.125` | Max mismatch rate (Cutadapt) for the forward/reverse UMI. Consider lower for UMIs <8 bp. |
+| `--error_primer1` / `--error_primer2` | `0.2` / `0.2` | Max mismatch rate (Cutadapt) for the forward/reverse primer. |
+| `--minreadssatellite` | `0.00000625` | Controls how "satellite OTUs" are removed, as a fraction of total input reads (default yields a min read count of ~5 on a typical run). |
+| `--minoverlap` | `0.75` | Minimum overlap (as a fraction of expected amplicon length) required for a BIN match. |
+| `--chimera_abskew` | `10` | `vsearch --uchime_denovo` `abskew` parameter. |
+| `--chimera_mindiv` | `0.0005` | `vsearch --uchime_denovo` `mindiv` parameter. |
+| `--bin_maxhits` | `1` | `vsearch --usearch_global` `maxhits` parameter (BIN matching). |
+| `--bin_maxaccepts` | `1` | `vsearch --usearch_global` `maxaccepts` parameter (BIN matching). |
 ---
 
 ## Outputs
@@ -207,6 +241,4 @@ To use a different reference library, copy your SINTAX-formatted `.fasta` into `
 
 ## Citation
 
-> Sean WJ Prosser, Ken A Thompson,  Nicholas W Bard, Robin M Floyd, Emine Ozsahin, and Paul DN Hebert. The Barcoding Inference Pipeline (BIP): From sequencer output to DNA barcodes. <i> In prep. </i>
-
-BIP_DATA="$(pwd)" docker compose -f compose.yaml   run --rm -e wkdir=/data bip   bash /BIP/SCRIPTS/BIP.sh   --platform nanopore --minreads 2 BAI
+> Sean WJ Prosser, Ken A Thompson, Nicholas W Bard, Robin M Floyd, Emine Ozsahin, and Paul DN Hebert. The Barcoding Inference Pipeline (BIP): From sequencer output to DNA barcodes. <i> In prep. </i>
