@@ -232,8 +232,8 @@ To use a different reference library, copy your SINTAX-formatted `.fasta` into `
 
 ## Troubleshooting
 
-- **No output on the host?** Make sure `wkdir=/data` is set (via `-e wkdir=/data`) and that `BIP_DATA` points at a real folder — otherwise BIP writes to its default in-container `/BIP/Barcoding`, which is lost when the container exits.
-- **"Multiple .xlsx files found"?** Check for a Microsoft Excel lock file (`~$<name>.xlsx`) in the same folder — it matches the same glob as your real parameters file. Close the file in Excel or delete the lock file.
+- **No output on the host?** Make sure `wkdir=/data` is set (via `-e wkdir=/data`) and that `BIP_DATA` points at a real folder. Otherwise BIP writes to its default in-container `/BIP/Barcoding`, which is lost when the container exits.
+- **"Multiple .xlsx files found"?** Check for a Microsoft Excel lock file (`~$<name>.xlsx`) in the same folder and ensure that the file is not open on your device. Close the file in Excel or delete the lock file.
 - **"Multiple files match" for the reference library?** Another file in `REFS/` shares the same prefix as your `Reference Library` value (e.g., a metadata PDF). Use a longer, more specific prefix.
 - **Disk space.** Large runs can generate many intermediate files; ensure adequate free disk on the Docker host.
 
