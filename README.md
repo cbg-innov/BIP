@@ -1,6 +1,6 @@
-# BIP — Barcode Identification Pipeline
+# BIP — Barcode Inference Pipeline
 
-BIP is a containerized DNA barcoding pipeline for use with all barcode sequences, with particular optimisation for the COI barcode. The pipeline covers the following: demultiplexing, primer/UMI trimming, per‑sample OTU clustering, reference‑frame sequence correction, chimera screening, SINTAX taxonomic assignment, and BOLD BIN matching. All tools (R/Python packages, reference databases) are included in the container. Supports **Illumina paired‑end**, **PacBio**, **Oxford Nanopore (ONT)**, and generic single‑end platforms.
+BIP is a containerized DNA barcoding pipeline for use with any genetic marker, primer set, and second-generation or third-generation sequencing platform, with extra features for the COI barcode region (COI-5P). BIP intakes raw sequence data and performs the following: paired-end merging (Illumina only), demultiplexing, primer/UMI trimming, per‑sample OTU clustering, reference‑frame sequence correction (COI-5P only), chimera detection and removal, probabilistic taxonomic assignment, barcode inference, and BIN matching (COI-5P only). All tools (R/Python packages, reference databases) are included in the container. Supports **Illumina paired‑end**, **PacBio**, **Oxford Nanopore (ONT)**, and generic single‑end platforms.
 
 ---
 
@@ -22,7 +22,7 @@ BIP is a containerized DNA barcoding pipeline for use with all barcode sequences
 
 ## What BIP does
 
-BIP can be provided with a non-demultiplexed `.fastq.gz` file and a `parameters.xlsx` spreadsheet (describing wells, UMIs, and primers) and produces per-well OTU consensus sequences with taxonomy and BOLD BIN assignments. 
+BIP must be provided with a non-demultiplexed `.fastq.gz` file (or `R1.fastq.gz` + `R2/fastq/gz` if Illumina paired-end data) and a `parameters.xlsx` spreadsheet (describing wells, UMIs, primer-specific parameters, and expected taxonomy) and produces per-well OTU table containing consensus sequences with taxonomy, target barcode versus non-target sequence status, various sequence quality metrics, and BOLD BIN assignments (COI-5P only). Additionally, a sintax-formated reference library (`.fasta`) must be provided (upon initial installation, BIP will download a COI BOLDistilled library but users can provide a library for any genetic marker).
 
 ---
 
@@ -30,17 +30,17 @@ BIP can be provided with a non-demultiplexed `.fastq.gz` file and a `parameters.
 
 Stages, in order (these are the exact stage names written to `duration_log.txt`):
 
-1. **Curating input data** — validate that exactly one `.fastq.gz`/`.fastq` and one `.xlsx` are present in the working directory.
-2. **FASTQ file merge** — for Illumina paired-end, merge R1/R2 with `PEAR`; otherwise concatenate.
+1. **Curating input data** — validate that at least one `.fastq.gz`/`.fastq` and exactly one `.xlsx` are present in the working directory.
+2. **FASTQ file merge** — for Illumina paired-end, merge R1/R2 with `PEAR`; otherwise concatenate all `.fastq.gz`/`.fastq` into a single file.
 3. **Primer recognition & read orientation** — orient and split reads by primer pair (`cutadapt`).
-4. **Size filtering** — length-filter by the `Min/Max amplicon length` set in the dictionary.
+4. **Size filtering** — length-filter by the `Min/Max amplicon length` set for each primer set.
 5. **Demultiplexing** — assign reads to wells by UMI (`cutadapt`), sanitize/rename sample headers.
 6. **OTU clustering** — per-well primary + secondary clustering (`vsearch`), consensus building via multiple-sequence alignment (`muscle`/`DECIPHER`/`msa` in R).
-7. **Indel correction** (COI only, full-length amplicons) — reference-frame homopolymer/indel correction against a curated reference set.
+7. **Indel correction** (COI-5P only, full-length amplicons) — reference-frame homopolymer/indel correction against a curated reference set.
 8. **Chimera removal** — `vsearch --uchime_denovo`.
-9. **Tax assignment** — SINTAX against the bundled BOLDistilled reference library.
-10. **Barcode inference** — classify OTUs as on-target barcodes vs. satellite/off-target, using a read-count floor scaled to run depth.
-11. **BIN matching** — match OTUs to BOLD BINs (`vsearch --usearch_global`) for COI markers.
+9. **Tax assignment** — `vsearch --sintax` against the user-specififed (or bundeled BOLDistilled) reference library.
+10. **Barcode inference** — classify OTUs as on-target barcodes vs. non-target sequences using a decision tree.
+11. **BIN matching** — (COI-5P only) — match OTUs to BOLD BINs (`vsearch --usearch_global`).
 12. **Report generation** — an R script renders a PDF report (`<RunName>_Report.pdf`) and writes `publication_metrics.txt`.
 
 ---
@@ -89,7 +89,7 @@ Results land in `./<RunName>_results/` inside your working directory. Your origi
 
 ## Run on your own data
 
-Same command as above — there are no `--fastq`/`--params` flags. BIP finds its inputs by scanning the working directory for exactly one `.fastq.gz` (or `.fastq`) and exactly one `.xlsx`. If it finds zero or more than one of either, it exits with an error naming the problem (this is also why a stray Microsoft Excel lock file, `~$parameters.xlsx`, will break the run if the params file is open elsewhere — close it first).
+Same command as above — there are no `--fastq`/`--params` flags. BIP finds its inputs by scanning the working directory for at least one `.fastq.gz` (or `.fastq`) and exactly one `.xlsx`. If it finds no `.fastq.gz`/`.fastq` or more than one `.xlsx`, it exits with an error naming the problem (this is also why a stray Microsoft Excel lock file, `~$parameters.xlsx`, will break the run if the params file is open elsewhere — close it first).
 
 - `--platform` is required: `illumina_pe`, `pacbio`, `nanopore`, or `other`.
 - `--minreads N` (default `5`) sets a floor for per-well OTU retention.
@@ -123,7 +123,7 @@ To make your own data visible inside the interactive container without `docker c
 
 ## Parameters
 
-The parameters spreadsheet (`.xlsx`) has three tabs: `Instructions`, `UMIs and Primers`, and `Dictionary Update`. The first two must be filled out; only add rows to `Dictionary Update` for primer pairs you're actually using.
+The parameters spreadsheet (`.xlsx`) has three tabs: `Instructions`, `UMIs and Primers`, and `Dictionary Update`. `Instructions` explains what each column in the next two tabs means. `UMIs and Primers` must be minimally completed as it provides well-based details; `Dictionary Update` only needs to be completed for primer pairs you're using for the first time or if you're updating primer-specific parameters.
 
 ### UMIs and Primers (one row per well)
 
@@ -133,23 +133,23 @@ The parameters spreadsheet (`.xlsx`) has three tabs: `Instructions`, `UMIs and P
 | **Well** | Well ID (e.g., `A01`) |
 | **Sample** | Sample name for this well |
 | **Forward / Reverse UMI** | UMI sequence for this well |
-| **Forward / Reverse Primer Name** | Must match a name defined in the `Dictionary Update` tab |
-| **Negative Control** | `yes` if this well is a negative control, otherwise leave blank |
-| **Kingdom … Species** | Optional expected taxonomy, used for reporting only |
+| **Forward / Reverse Primer Name** | Must match a name defined in the persistent `dictionary_BIP.tsv` file or specified in the `Dictionary Update` tab |
+| **Negative Control** | `yes`, `y`, `Y`, `1`, etc if this well is a negative control, otherwise leave blank |
+| **Kingdom … Species** | Optional expected taxonomy, used to greatly aid barcode inference |
 
 ### Dictionary Update (one row per primer pair)
 
 | Field | Meaning |
 |---|---|
-| **Forward / Reverse Primer Name** | Name referenced from the `UMIs and Primers` tab |
-| **Forward / Reverse Primer Sequence** | The actual primer sequence |
-| **Marker** | Locus name (e.g., `COI-5P`) |
-| **Reference Library** | Prefix of a SINTAX-formatted `.fasta` in `REFS/` (e.g., `BOLDistilled_COI_Apr2026` matching `BOLDistilled_COI_Apr2026_SEQUENCES_sintax.fasta`). Must be an unambiguous prefix — if another file in `REFS/` shares it, the run fails with a "multiple files match" error. |
+| **Forward / Reverse Primer Name** | Name referenced in the `UMIs and Primers` tab |
+| **Forward / Reverse Primer Sequence** | The actual primer sequence (5' to 3')|
+| **Marker** | Locus name (e.g., `COI-5P` for the COI barcode region, anything else for all other markers) |
+| **Reference Library** | Prefix of a SINTAX-formatted `.fasta` in `REFS/` (e.g., `BOLDistilled_COI_Apr2026` is fine for referring to `BOLDistilled_COI_Apr2026_SEQUENCES_sintax.fasta`). Must be an unambiguous prefix — if another file in `REFS/` shares it, the run fails with a "multiple files match" error. |
 | **Min / Max amplicon length** | Length filter, applied with UMIs and primers still attached |
 | **Target amplicon length** | Expected clean amplicon length (no primers/UMIs) |
 | **Primary / Secondary OTU clustering threshold** | vsearch clustering identity thresholds (within-well, then across-run) |
 | **Tax assign probability threshold** | SINTAX confidence cutoff |
-| **BIN assign threshold** | Minimum identity to accept a BOLD BIN match |
+| **BIN assign threshold** | Minimum identity to accept a BOLD BIN match (used for COI-5P only) |
 
 Entries here are merged into a persistent `dictionary_BIP.tsv` in your working directory each run, so previously-used primer pairs accumulate rather than needing to be re-entered every time.
 
@@ -164,13 +164,14 @@ A handful of parameters (UMI/primer overlap minimums, per-base error tolerances,
 Written to `<wkdir>/<RunName>_results/`:
 
 - **`<RunName>_Report.pdf`** — summary report.
-- **`publication_metrics.txt`** — run parameters, software versions, and system info.
+- **`publication_metrics.txt`** — run parameters, software versions, and system info often required for publication.
 - **`duration_log.txt`** — per-stage timing.
+- - **`Original_Files/`** — your original `.fastq.gz`/`.fastq` and `.xlsx` files.
 - **`<PrimerPair>/`** — per-primer-pair OTU details (`<RunName>__<PrimerPair>__OTUDetails.tsv`), consensus FASTA files, and error-correction intermediates.
 - **`Miscelleneous_Files/`** — read-count summaries, the merged parameters TSV, and other intermediate files.
-- **`Individual_Raw_Fastq_Files.tar.gz`** — per-well demultiplexed reads.
+- **`Individual_Raw_Fastq_Files.tar.gz`** — per-well demultiplexed reads, often required for SRA archiving for publication.
 
-Your original `.fastq.gz`, `.xlsx`, `dictionary_BIP.tsv`, and `compose.yaml` (if present) stay at the top level of `wkdir` rather than being archived into the results folder.
+Your original `.fastq.gz`/`.fastq`, `.xlsx`, `dictionary_BIP.tsv`, and `compose.yaml` (if present) stay at the top level of `wkdir` rather than being archived into the results folder. If your run is successful you can delete the original `.fastq.gz`/`.fastq` files and `.xlsx' files as these are archived in the `Original_Files/` folder in your results.
 
 ---
 
