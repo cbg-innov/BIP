@@ -1,33 +1,48 @@
 #!/bin/bash
 # version 0.1
-# Usage: bash BIP.sh --platform <illumina_pe|pacbio|nanopore|other> [--minreads N] <RunName>
-
-# ---------------------------
-# Set system parameters
-# ---------------------------
+# Usage: bash BIP.sh --platform <illumina_pe|pacbio|nanopore|other> [options] <RunName>
+# Run with no arguments (other than --platform/<RunName>) to use the defaults below.
 
 export PATH="$PATH"
-cores_to_leave=3
-cores=$(($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu) - $cores_to_leave))
+
+# ---------------------------
+# Set user-specific arguments (all overridable via --flag or env var; flags win)
+# ---------------------------
+
+cores_to_leave="${cores_to_leave:-3}"
 wkdir="${wkdir:-/BIP/Barcoding}"
 scripts_directory="${scripts_directory:-/BIP/SCRIPTS}"
 reference_library_directory="${reference_library_directory:-/BIP/REFS}"
+ref_seq_corr="${ref_seq_corr:-}"
 
 platform=""
 minreads=5
 runid=""
 
-cd $wkdir
+#~#~#~#~#~#~#~#~#~#~#
+# Advanced parameters
+#~#~#~#~#~#~#~#~#~#~#
 
-# ---------------------------
-# Start duration log
-# ---------------------------
-
-START_TIME=$(date +%s)
-START_LABEL=$(date "+%Y-%m-%d %H:%M:%S")
-printf "%-30s %-22s %-22s %-15s\n" "Stage" "Start" "End" "Duration"  > duration_log.txt
-printf "%-30s %-22s %-22s %-15s\n" "-----" "-----" "---" "--------" >> duration_log.txt
-
+# This value is used as a multiplier with UMI lengths during demultiplexing. We recommend 0.75 for UMIs greater than or equal to 12 nucleotides, and 1.0 for UMIs with fewer than 12 nucleotides.
+umi_overlap_min=0.75
+# This value is used as a multiplier with primer lengths. We recommend 0.75.
+primer_overlap_min=0.75
+# Percentage of mismatches allowed in the forward/reverse UMIs. For UMIs shorter than 8 bp, we recommend 0.0.
+error_umi1=0.125
+error_umi2=0.125
+# Percentage of mismatches allowed in the forward/reverse primers.
+error_primer1=0.2
+error_primer2=0.2
+# Controls how "satellite OTUs" are removed. Default will result in a min read of 5.
+minreadssatellite=0.00000625
+# Minimum overlap needed for a BIN to match to an OTU. Default is 75% of expected amplicon size.
+minoverlap=0.75
+# Parameters for VSEARCH's uchime_denovo command (chimera removal).
+chimera_abskew=10
+chimera_mindiv=0.0005
+# Parameters for VSEARCH's usearch_global command (BIN matching).
+bin_maxhits=1
+bin_maxaccepts=1
 
 # ---------------------------
 # Parse arguments properly
@@ -47,9 +62,77 @@ while [[ $# -gt 0 ]]; do
             minreads="$2"
             shift 2
             ;;
+        --wd)
+            wkdir="$2"
+            shift 2
+            ;;
+        --scripts)
+            scripts_directory="$2"
+            shift 2
+            ;;
+        --refs)
+            reference_library_directory="$2"
+            shift 2
+            ;;
+        --ref_seq_corr)
+            ref_seq_corr="$2"
+            shift 2
+            ;;
+        --cores_to_leave)
+            cores_to_leave="$2"
+            shift 2
+            ;;
+        --umi_overlap_min)
+            umi_overlap_min="$2"
+            shift 2
+            ;;
+        --primer_overlap_min)
+            primer_overlap_min="$2"
+            shift 2
+            ;;
+        --error_umi1)
+            error_umi1="$2"
+            shift 2
+            ;;
+        --error_umi2)
+            error_umi2="$2"
+            shift 2
+            ;;
+        --error_primer1)
+            error_primer1="$2"
+            shift 2
+            ;;
+        --error_primer2)
+            error_primer2="$2"
+            shift 2
+            ;;
+        --minreadssatellite)
+            minreadssatellite="$2"
+            shift 2
+            ;;
+        --minoverlap)
+            minoverlap="$2"
+            shift 2
+            ;;
+        --chimera_abskew)
+            chimera_abskew="$2"
+            shift 2
+            ;;
+        --chimera_mindiv)
+            chimera_mindiv="$2"
+            shift 2
+            ;;
+        --bin_maxhits)
+            bin_maxhits="$2"
+            shift 2
+            ;;
+        --bin_maxaccepts)
+            bin_maxaccepts="$2"
+            shift 2
+            ;;
         -*)
             echo "ERROR: Unknown option $1"
-            echo "Usage: bash BIP.sh --platform <illumina_pe|pacbio|nanopore|other> [--minreads N] <RunName>"
+            echo "Usage: bash BIP.sh --platform <illumina_pe|pacbio|nanopore|other> [options] <RunName>"
             exit 1
             ;;
         *)
@@ -66,7 +149,7 @@ done
 
 if [[ -z "$runid" ]]; then
     echo "ERROR: No run name provided."
-    echo "Usage: bash BIP.sh --platform <illumina_pe|pacbio|nanopore|other> [--minreads N] <RunName>"
+    echo "Usage: bash BIP.sh --platform <illumina_pe|pacbio|nanopore|other> [options] <RunName>"
     exit 1
 fi
 
@@ -74,6 +157,19 @@ if [[ -z "$platform" ]]; then
     echo "ERROR: --platform is required. Must be one of: illumina_pe, pacbio, nanopore, other"
     exit 1
 fi
+
+cores=$(($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu) - $cores_to_leave))
+
+cd "$wkdir"
+
+# ---------------------------
+# Start duration log
+# ---------------------------
+
+START_TIME=$(date +%s)
+START_LABEL=$(date "+%Y-%m-%d %H:%M:%S")
+printf "%-30s %-22s %-22s %-15s\n" "Stage" "Start" "End" "Duration"  > duration_log.txt
+printf "%-30s %-22s %-22s %-15s\n" "-----" "-----" "---" "--------" >> duration_log.txt
 
 # Derive behaviour flags from platform
 do_pear=0
@@ -90,20 +186,6 @@ counts_file="$wkdir/${runid}_readcounts.tsv"
 echo -e "runid\tstage\tprimer_pair\treads" > "$counts_file"
 
 rescue_log="$wkdir/${runid}_symmetrical_umi_rescue_log.txt"
-
-# ---------------------------
-# Set advanced parameters
-# ---------------------------
-
-umi_overlap_min=0.75 # This value is used as a multiplier with UMI lengths furing demultiplexing. We recommend 0.75 for UMIs greather than or equal to 12 nucleotides, and 1.0 for UMIs with fewer than 12 nucleotides.
-primer_overlap_min=0.75 # This value is used as a multiplier with primer lengths. We recommend 0.75.
-error_umi1=0.125 # This is the percentage of mismatches allowed in the forward UMIs. For UMIs shorter than 8 bp, we recommend 0.0.
-error_umi2=0.125 # This is the percentage of mismatches allowed in the reverse UMIs. For UMIs shorter than 8 bp, we recommend 0.0.
-error_primer1=0.2 # This is the percentage of mismatches allowed in the forward primers.
-error_primer2=0.2 # This is the percentage of mismatches allowed in the reverse primers.
-minreadssatellite=0.00000625 # This controls how "satellite OTUs" are removed. Default will result in a min read of 5.
-minoverlap=0.75 #This is the minimum overlap needed for a BIN to match to an OTU. Default is 75% of expected amplicon size.
-#minoverlap=$(echo "$ampsize * 0.75" | bc)
 
 # ---------------------------
 # PARAMETERS SPREADSHEET: COLUMN NAMES
@@ -315,8 +397,8 @@ sampletask() {
     if [[ "$chimera_early" -eq 1 && "$ampsize" -ge 200 ]]; then
 
         vsearch --uchime_denovo "${sampleid}_derep.fasta" \
-            --abskew 10 \
-            --mindiv 0.0005 \
+            --abskew "$chimera_abskew" \
+            --mindiv "$chimera_mindiv" \
             --nonchimeras "${sampleid}_nochim.fasta" \
             --threads 1
 
@@ -705,7 +787,7 @@ process_primer_dir() {
         # Keyed on the read ID rather than the sequence: two distinct reads from the
         # same sample can legitimately share a sequence (short, high-depth, low-error
         # data), and deduplicating on sequence would discard both. The ID identifies
-        # the physical read, which is what "matched in both passes" actually means.
+        # the physical read.
         seqkit seq -n -i "$single_all" \
             | sort \
             | uniq -d \
@@ -980,12 +1062,21 @@ process_primer_dir() {
         T=$(date +%s); TL=$(date "+%Y-%m-%d %H:%M:%S")
 
         echo -e "******** Auto-trim and indel correction"
-        errcorr_refs=("$reference_library_directory"/reference_seqs_*.fasta)
-        if [[ ${#errcorr_refs[@]} -ne 1 || ! -f "${errcorr_refs[0]}" ]]; then
-            echo "ERROR: expected exactly 1 reference_seqs_*.fasta in $reference_library_directory (found ${#errcorr_refs[@]})"
-            exit 1
+        if [[ -n "$ref_seq_corr" ]]; then
+            if [[ ! -f "$ref_seq_corr" ]]; then
+                echo "ERROR: --ref_seq_corr file not found: $ref_seq_corr"
+                exit 1
+            fi
+            errcorr_ref="$ref_seq_corr"
+        else
+            errcorr_refs=("$reference_library_directory"/reference_seqs_*.fasta)
+            if [[ ${#errcorr_refs[@]} -ne 1 || ! -f "${errcorr_refs[0]}" ]]; then
+                echo "ERROR: expected exactly 1 reference_seqs_*.fasta in $reference_library_directory (found ${#errcorr_refs[@]})"
+                exit 1
+            fi
+            errcorr_ref="${errcorr_refs[0]}"
         fi
-        python3.11 "$scripts_directory/bip2_homopolymer_error_fix.py" "$runid".fasta "${errcorr_refs[0]}"
+        python3.11 "$scripts_directory/bip2_homopolymer_error_fix.py" "$runid".fasta "$errcorr_ref"
 
         # combine trimmed/corrected and un-trimmed/un-corrected sequences into a single FASTA file
         awk '/^>/{if (seq) print seq; print; seq=""; next} {seq=seq $0} END{print seq}' problem_seqs.fasta > problem_seqs_singleline.fasta
@@ -1004,8 +1095,8 @@ process_primer_dir() {
         T=$(date +%s); TL=$(date "+%Y-%m-%d %H:%M:%S")
         echo -e "******** Chimera screening OTU consensus sequences"
         vsearch --uchime_denovo "$runid".corrected.fasta \
-            --abskew 10 \
-            --mindiv 0.0005 \
+            --abskew "$chimera_abskew" \
+            --mindiv "$chimera_mindiv" \
             --nonchimeras "$runid".corrected.nochim.fasta \
             --threads $cores
         mv "$runid".corrected.nochim.fasta "$runid".corrected.fasta
@@ -1101,8 +1192,8 @@ process_primer_dir() {
             --db "$vsearch_udb" \
             --blast6out bin_raw.txt \
             --id "$bin_thresh" \
-            --maxhits 1 \
-            --maxaccepts 1 \
+            --maxhits "$bin_maxhits" \
+            --maxaccepts "$bin_maxaccepts" \
             --threads $cores
 
         awk -F'\t' -v mo="$min_overlap_bp" '
