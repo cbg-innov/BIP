@@ -1,5 +1,7 @@
 #make BOLDdistilled lib persist.
 
+name: bip
+
 services:
   bip:
     image: ghcr.io/cbg-innov/bip:latest

@@ -10,11 +10,11 @@ BIP is a containerized DNA barcoding pipeline for use with any genetic marker, p
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [Run on your own data](#run-on-your-own-data)
-- [Interactive container](#interactive-container)
 - [Parameters](#parameters)
+- [Reference library](#reference-library)
 - [Outputs](#outputs)
 - [Build the image yourself](#build-the-image-yourself)
-- [Reference library](#reference-library)
+- [Interactive container](#interactive-container)
 - [Troubleshooting](#troubleshooting)
 - [Citation](#citation)
 
@@ -22,7 +22,7 @@ BIP is a containerized DNA barcoding pipeline for use with any genetic marker, p
 
 ## What BIP does
 
-BIP must be provided with a non-demultiplexed `.fastq.gz` file (or `R1.fastq.gz` + `R2/fastq/gz` if Illumina paired-end data) and a `parameters.xlsx` spreadsheet (describing wells, UMIs, primer-specific parameters, and expected taxonomy) and produces per-well OTU table containing consensus sequences with taxonomy, target barcode versus non-target sequence status, various sequence quality metrics, and BOLD BIN assignments (COI-5P only). Additionally, a sintax-formated reference library (`.fasta`) must be provided (upon initial installation, BIP will download a COI BOLDistilled library but users can provide a library for any genetic marker).
+BIP must be provided with a non-demultiplexed `.fastq.gz` file (or `R1.fastq.gz` + `R2.fastq.gz` if Illumina paired-end data) and a `parameters.xlsx` spreadsheet (describing wells, UMIs, primer-specific parameters, and expected taxonomy) and produces per-well OTU table containing consensus sequences with taxonomy, target barcode versus non-target sequence status, various sequence quality metrics, and BOLD BIN assignments (COI-5P only). A SINTAX-formatted reference library (`.fasta`) is also required — a COI BOLDistilled library is bundled into the Docker image at build time, so it's already available with no extra setup, but you can supply your own for any genetic marker instead (see [Reference library](#reference-library)).
 
 ---
 
@@ -38,7 +38,7 @@ Stages, in order (these are the exact stage names written to `duration_log.txt`)
 6. **OTU clustering** — per-well primary + secondary clustering (`vsearch`), consensus building via multiple-sequence alignment (`muscle`/`DECIPHER`/`msa` in R).
 7. **Indel correction** (COI-5P only, full-length amplicons) — reference-frame homopolymer/indel correction against a curated reference set.
 8. **Chimera removal** — `vsearch --uchime_denovo`.
-9. **Tax assignment** — `vsearch --sintax` against the user-specififed (or bundeled BOLDistilled) reference library.
+9. **Tax assignment** — `vsearch --sintax` against the user-specified (or bundled BOLDistilled) reference library.
 10. **Barcode inference** — classify OTUs as on-target barcodes vs. non-target sequences using a decision tree.
 11. **BIN matching** — (COI-5P only) — match OTUs to BOLD BINs (`vsearch --usearch_global`).
 12. **Report generation** — an R script renders a PDF report (`<RunName>_Report.pdf`) and writes `publication_metrics.txt`.
@@ -66,74 +66,49 @@ docker run hello-world                      # verify, no sudo
 
 ## Quick start
 
-Change directory to a working directory containing your `.fastq.gz`, parameters `.xlsx`, and `compose.yaml`. Start by downloading the three files in the small demo dataset included in the BIP repo's `workdir/` directory (`BAI109_demo.fastq.gz` + `parameters.xlsx` + `compose.yaml`), before using real data. Navigate to a new working directory with the files copied and edited as needed, but replace the `fastq.gz` with your own data. Now you are ready to run BIP!
+Run the bundled demo first to confirm your setup works, before touching real data. Copy the three files from the BIP repo's `workdir/` directory (`BAI109_demo.fastq.gz` + `parameters.xlsx` + `compose.yaml`) into a working directory of your own.
 
 **Pull the image:**
 ```bash
 docker pull ghcr.io/cbg-innov/bip:latest
 ```
 
-**Set up a working directory and run:**
+**Run the demo:**
 ```bash
 mkdir -p ~/bip_workdir && cd ~/bip_workdir
-cp /path/to/your.fastq.gz /path/to/parameters.xlsx .
+cp /path/to/workdir/BAI109_demo.fastq.gz /path/to/workdir/parameters.xlsx /path/to/workdir/compose.yaml .
 
-BIP_DATA="$(pwd)" docker compose -f /path/to/Docker/compose.yaml run --rm \
+BIP_DATA="$(pwd)" docker compose -f compose.yaml run --rm \
   -e wkdir=/data \
-  bip bash /BIP/SCRIPTS/BIP.sh --platform nanopore --minreads 2 <RunName>
+  bip bash /BIP/SCRIPTS/BIP.sh --platform nanopore --minreads 2 DemoRun
 ```
 
-Results land in `./<RunName>_results/` inside your working directory. Your original `.fastq.gz`, `.xlsx`, and a persistent `dictionary_BIP.tsv` are not moved or archived, so you can rerun without re-copying anything.
+Results land in `./DemoRun_results/` inside your working directory. 
 
 ---
 
 ## Run on your own data
 
-Same command as above — there are no `--fastq`/`--params` flags. BIP finds its inputs by scanning the working directory for at least one `.fastq.gz` (or `.fastq`) and exactly one `.xlsx`. If it finds no `.fastq.gz`/`.fastq` or more than one `.xlsx`, it exits with an error naming the problem (this is also why a stray Microsoft Excel lock file, `~$parameters.xlsx`, will break the run if the params file is open elsewhere — close it first).
-
-- `--platform` is required: `illumina_pe`, `pacbio`, `nanopore`, or `other`.
-- `--minreads N` (default `5`) sets a floor for per-well OTU retention.
-- The last argument is the run name you wish to provide, which is essential for naming outputs.
-- `wkdir` (working directory), `scripts_directory`, and `reference_library_directory` are environment variables, not flags — set via `-e` on `docker compose run`, as shown above. Their in-container defaults are `/BIP/Barcoding`, `/BIP/SCRIPTS`, and `/BIP/REFS`.
-- For Illumina paired-end data, set `--platform illumina_pe`; BIP merges R1/R2 with `PEAR` before proceeding.
-
-Use with custom advanced parameters (e.g., change chimera_mindiv):
+Once that's worked, switch to your own data **in the same directory** — replace the files and rerun the identical command. You may also override advanced parameters here with a flag (e.g., `--chimera_mindiv`), for instance:
 ```bash
-BIP_DATA="$(pwd)" docker compose -f /path/to/Docker/compose.yaml run --rm \
+rm BAI109_demo.fastq.gz
+cp /path/to/your.fastq.gz /path/to/your_parameters.xlsx .
+
+BIP_DATA="$(pwd)" docker compose -f compose.yaml run --rm \
   -e wkdir=/data \
   bip bash /BIP/SCRIPTS/BIP.sh --platform nanopore --minreads 2 <RunName> --chimera_mindiv 0.001
 ```
 
-To use your local directory with reference files, run and mount the reference directory (e.g., ~/Desktop/REFS):
+No new flags needed for this. BIP just rescans the working directory for at least one `.fastq.gz` (or `.fastq`) and exactly one `.xlsx`. Your `.fastq.gz`, `.xlsx`, and a persistent `dictionary_BIP.tsv` are never moved or archived, so you can rerun without re-copying anything. If it finds no `.fastq.gz`/`.fastq` or more than one `.xlsx`, it exits with an error naming the problem (this is also why a stray Microsoft Excel lock file, `~$parameters.xlsx`, will break the run if the params file is open elsewhere).
 
-``` bash
-BIP_DATA="$(pwd)" docker compose -f /path/to/Docker/compose.yaml run --rm \
-  -e wkdir=/data \
-  -v ~/Desktop/REFS:/myrefs \
-  bip bash /BIP/SCRIPTS/BIP.sh --platform nanopore --minreads 2 --refs /myrefs <RunName>
-```
+- `--platform` is required: `illumina_pe`, `pacbio`, `nanopore`, or `other`.
+- `--minreads N` (default `5`) sets a floor for per-well OTU retention.
+- The last argument is the run name you wish to provide, which is essential for naming outputs.
+- `wkdir` (working directory), `scripts_directory`, and `reference_library_directory` are environment variables, not flags. Set via `-e` on `docker compose run`, as shown above. Their in-container defaults are `/BIP/Barcoding`, `/BIP/SCRIPTS`, and `/BIP/REFS`.
+- For Illumina paired-end data, set `--platform illumina_pe`; BIP merges R1/R2 with `PEAR` before proceeding.
 
 
----
-
-## Interactive container
-
-```bash
-docker compose -f Docker/compose.yaml up -d      # start a long-running 'bip' container
-docker compose exec bip bash                      # drop into a shell (the 'bip' env auto-activates)
-
-# inside the container:
-bash /BIP/SCRIPTS/BIP.sh --platform nanopore --minreads 2 <RunName>
-
-docker compose down     # stop & remove the container (the reflib volume persists)
-```
-
-To make your own data visible inside the interactive container without `docker compose run`, set `BIP_DATA` before `up -d`, or add a bind mount directly under the `bip` service in `compose.yaml`:
-```yaml
-    volumes:
-      - reflib:/BIP/REFS
-      - ~/Desktop/my_run:/data
-```
+To use your own reference library instead of the bundled one, see [Reference library](#reference-library).
 
 ---
 
@@ -191,6 +166,26 @@ A handful of parameters (UMI/primer overlap minimums, per-base error tolerances,
 | `--chimera_mindiv` | `0.0005` | `vsearch --uchime_denovo` `mindiv` parameter. |
 | `--bin_maxhits` | `1` | `vsearch --usearch_global` `maxhits` parameter (BIN matching). |
 | `--bin_maxaccepts` | `1` | `vsearch --usearch_global` `maxaccepts` parameter (BIN matching). |
+
+---
+
+## Reference library
+
+The BOLDistilled COI SINTAX reference set and the error-correction reference set are both downloaded and unpacked into `/BIP/REFS` **at image build time** (not first run). With `docker compose`, `REFS` is mounted as a named volume (`reflib`) so it persists across container recreation.
+
+To use a different reference library, set the `Reference Library` field in your `parameters.xlsx`'s `Dictionary Update` tab to an unambiguous prefix of your reference file's name, then make the file itself available one of two ways:
+
+**From a folder on your local device** (no rebuild needed) — mount it and point `--refs` at it:
+```bash
+BIP_DATA="$(pwd)" docker compose -f /path/to/workdir/compose.yaml run --rm \
+  -e wkdir=/data \
+  -v ~/Desktop/REFS:/myrefs \
+  bip bash /BIP/SCRIPTS/BIP.sh --platform nanopore --minreads 2 --refs /myrefs <RunName>
+```
+Since `--refs` replaces the search location entirely rather than adding to it, `~/Desktop/REFS` needs to contain both your SINTAX-formatted `.fasta` *and* the error-correction reference (`reference_seqs_*.fasta`) — or use `--ref_seq_corr /BIP/REFS/reference_seqs_327K.fasta` to keep pulling that one specific file from the built-in volume while everything else comes from your local folder.
+
+**Permanently, in the built-in `reflib` volume** — copy your file directly into `REFS/` before building your own image, so it's baked in alongside the bundled BOLDistilled library.
+
 ---
 
 ## Outputs
@@ -200,12 +195,11 @@ Written to `<wkdir>/<RunName>_results/`:
 - **`<RunName>_Report.pdf`** — summary report.
 - **`publication_metrics.txt`** — run parameters, software versions, and system info often required for publication.
 - **`duration_log.txt`** — per-stage timing.
-- - **`Original_Files/`** — your original `.fastq.gz`/`.fastq` and `.xlsx` files.
 - **`<PrimerPair>/`** — per-primer-pair OTU details (`<RunName>__<PrimerPair>__OTUDetails.tsv`), consensus FASTA files, and error-correction intermediates.
 - **`Miscelleneous_Files/`** — read-count summaries, the merged parameters TSV, and other intermediate files.
 - **`Individual_Raw_Fastq_Files.tar.gz`** — per-well demultiplexed reads, often required for SRA archiving for publication.
 
-Your original `.fastq.gz`/`.fastq`, `.xlsx`, `dictionary_BIP.tsv`, and `compose.yaml` (if present) stay at the top level of `wkdir` rather than being archived into the results folder. If your run is successful you can delete the original `.fastq.gz`/`.fastq` files and `.xlsx' files as these are archived in the `Original_Files/` folder in your results.
+Your original `.fastq.gz`/`.fastq`, `.xlsx`, `dictionary_BIP.tsv`, and `compose.yaml` (if present) stay at the top level of `wkdir`. They are never moved or archived into the results folder, so nothing is lost if you delete `<RunName>_results/` and rerun.
 
 ---
 
@@ -216,17 +210,30 @@ Your original `.fastq.gz`/`.fastq`, `.xlsx`, `dictionary_BIP.tsv`, and `compose.
 cd Docker
 docker build -t bip .
 ```
-This installs the environment via `micromamba`, lays out `SCRIPTS/` and `Barcoding/`, and downloads + unpacks the SINTAX reference library and error-correction reference set. `
+This installs the environment via `micromamba`, lays out `SCRIPTS/` and `Barcoding/`, and downloads + unpacks the SINTAX reference library and error-correction reference set.
 
 Run a locally-built image by using `bip:latest` instead of `ghcr.io/cbg-innov/bip:latest` in the commands above.
 
 ---
 
-## Reference library
+## Interactive container
+```bash
+docker compose -f workdir/compose.yaml up -d      # start a long-running 'bip' container
+docker compose exec bip bash                      # drop into a shell (the 'bip' env auto-activates)
 
-The BOLDistilled COI SINTAX reference set and the error-correction reference set are both downloaded and unpacked into `/BIP/REFS` **at image build time** (not first run), so no internet connection is needed at run time beyond pulling the image. With `docker compose`, `REFS` is mounted as a named volume (`reflib`) so it persists across container recreation.
+# inside the container:
+bash /BIP/SCRIPTS/BIP.sh --platform nanopore --minreads 2 <RunName>
 
-To use a different reference library, copy your SINTAX-formatted `.fasta` into `REFS/` and set the `Reference Library` field in the `Dictionary Update` tab to an unambiguous prefix of its filename.
+docker compose down     # stop & remove the container (the reflib volume persists)
+```
+
+To make your own data visible inside the interactive container without `docker compose run`, set `BIP_DATA` before `up -d`, or add a bind mount directly under the `bip` service in `compose.yaml`:
+```yaml
+    volumes:
+      - reflib:/BIP/REFS
+      - ~/Desktop/my_run:/data
+
+```
 
 ---
 
@@ -241,4 +248,4 @@ To use a different reference library, copy your SINTAX-formatted `.fasta` into `
 
 ## Citation
 
-> Sean WJ Prosser, Ken A Thompson, Nicholas W Bard, Robin M Floyd, Emine Ozsahin, and Paul DN Hebert. The Barcoding Inference Pipeline (BIP): From sequencer output to DNA barcodes. <i> In prep. </i>
+> Sean WJ Prosser, Ken A Thompson, Nicholas W Bard, Robin M Floyd, Emine Ozsahin, and Paul DN Hebert. The Barcode Inference Pipeline (BIP): From sequencer output to DNA barcodes. <i> In prep. </i>
