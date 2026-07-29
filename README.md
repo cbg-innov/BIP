@@ -248,4 +248,4 @@ To make your own data visible inside the interactive container without `docker c
 
 ## Citation
 
-> Sean WJ Prosser, Ken A Thompson, Nicholas W Bard, Robin M Floyd, Emine Ozsahin, and Paul DN Hebert. The Barcode Inference Pipeline (BIP): From sequencer output to DNA barcodes. <i> In prep. </i>
+> Sean WJ Prosser, Ken A Thompson, Nicholas W Bard, Robin M Floyd, Emine Ozsahin, and Paul DN Hebert (2026). The Barcode Inference Pipeline (BIP): From sequencer output to DNA barcodes. <i> BioRxiv </I>. https://doi.org/10.64898/2026.07.21.739876
