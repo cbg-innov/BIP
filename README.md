@@ -64,11 +64,11 @@ docker run hello-world                      # verify, no sudo
 
 ---
 
-## Quick start
+## To install BIP: Quick start
 
 Run the bundled demo first to confirm your setup works, before touching real data. Copy the three files from the BIP repo's `workdir/` directory (`BAI109_demo.fastq.gz` + `parameters.xlsx` + `compose.yaml`) into a working directory of your own.
 
-**Pull the image:**
+**Pull the image:** This installs BIP.
 ```bash
 docker pull ghcr.io/cbg-innov/bip:latest
 ```
