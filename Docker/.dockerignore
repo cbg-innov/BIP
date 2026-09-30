@@ -1,0 +1,19 @@
+# Files in this folder that must NOT be copied into the image by `COPY . .`.
+# Everything else (scripts, demo reads, parameters template, reference zip) is kept.
+
+# macOS / editor / R session files
+.DS_Store
+._*
+.Rhistory
+.RData
+.Rproj.user
+*~
+*.swp
+
+# Excel/Word lock files. They also match *.xlsx.
+~$*
+
+# Build files that are not needed inside the image
+Dockerfile
+.dockerignore
+compose.yaml

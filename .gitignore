@@ -1,1 +1,15 @@
+# macOS
 .DS_Store
+
+# R
+.Rhistory
+
+# MAP runtime state
+**/.map_status/
+
+# Python
+__pycache__/
+*.pyc
+
+# Snakemake working metadata
+.snakemake/
