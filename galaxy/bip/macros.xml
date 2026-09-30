@@ -1,6 +1,11 @@
 <macros>
-    <!-- BIP.sh reports "version 0.1"; bump VERSION_SUFFIX for wrapper-only changes. -->
-    <token name="@TOOL_VERSION@">0.1</token>
+    <!--
+      TOOL_VERSION is the BIP release (git tag vX.Y.Z, GHCR image X.Y.Z) and also
+      selects the container below. Bump VERSION_SUFFIX for wrapper-only changes.
+      Release by tagging vX.Y.Z (TOOL_VERSION, suffix 0) or vX.Y.Z+galaxyN
+      (suffix N); the release job checks the tag matches these two tokens.
+    -->
+    <token name="@TOOL_VERSION@">1.0.1</token>
     <token name="@VERSION_SUFFIX@">0</token>
     <token name="@PROFILE@">24.0</token>
 
@@ -10,10 +15,10 @@
               BIP ships as a single self-contained image on GHCR that already
               bundles every R/Python/CLI dependency AND the reference libraries.
               Galaxy's ExplicitDockerContainerResolver picks this up directly
-              (docker or singularity). See the CI note about pinning by digest
-              for full reproducibility instead of the mutable :latest tag.
+              (docker or singularity). Pinned to the release version rather than
+              the mutable :latest tag, so each Tool Shed revision is reproducible.
             -->
-            <container type="docker">ghcr.io/cbg-innov/bip:latest</container>
+            <container type="docker">ghcr.io/cbg-innov/bip:@TOOL_VERSION@</container>
         </requirements>
     </xml>
 

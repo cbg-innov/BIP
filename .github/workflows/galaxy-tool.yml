@@ -1,7 +1,13 @@
-name: Galaxy tool (lint + test)
+name: Galaxy tool (lint + test + release)
 
 on:
   push:
+    # Branch pushes run only when Galaxy files change; path filters are not
+    # applied to tag pushes, so every v* tag runs lint + test + release.
+    branches:
+      - '**'
+    tags:
+      - 'v*'
     paths:
       - 'galaxy/**'
       - '.github/workflows/galaxy-tool.yml'
@@ -10,6 +16,9 @@ on:
       - 'galaxy/**'
       - '.github/workflows/galaxy-tool.yml'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -46,12 +55,6 @@ jobs:
       - name: Check Docker
         run: docker version
 
-      # Optional but recommended: pin the image to an immutable digest instead of
-      # the mutable :latest tag so CI (and users) always get a reproducible build.
-      # Uncomment and set the digest, then mirror it in macros.xml.
-      # - name: Pre-pull image
-      #   run: docker pull ghcr.io/cbg-innov/bip@sha256:<digest>
-
       - name: Test tool inside its container
         # --docker makes Galaxy's ExplicitDockerContainerResolver run the job in the
         # image declared by <container type="docker"> in macros.xml.
@@ -72,3 +75,53 @@ jobs:
             test_report.html
             test_report.json
           if-no-files-found: ignore
+
+  release:
+    name: Release to Galaxy Tool Shed
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Refuse to publish a release that doesn't match macros.xml, or that points
+      # at a BIP image which hasn't been pushed to GHCR yet.
+      - name: Check tag, tool version and container agree
+        run: |
+          macros=galaxy/bip/macros.xml
+          tag="${GITHUB_REF_NAME#v}"
+          version="${tag%%+galaxy*}"
+          if [[ "$tag" == *+galaxy* ]]; then suffix="${tag##*+galaxy}"; else suffix=0; fi
+          tool_version=$(sed -n 's:.*<token name="@TOOL_VERSION@">\([^<]*\)</token>.*:\1:p' "$macros")
+          tool_suffix=$(sed -n 's:.*<token name="@VERSION_SUFFIX@">\([^<]*\)</token>.*:\1:p' "$macros")
+          echo "tag=$GITHUB_REF_NAME -> version=$version suffix=$suffix"
+          echo "macros.xml -> TOOL_VERSION=$tool_version VERSION_SUFFIX=$tool_suffix"
+          if [[ "$version" != "$tool_version" || "$suffix" != "$tool_suffix" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match macros.xml (TOOL_VERSION=$tool_version, VERSION_SUFFIX=$tool_suffix)."
+            exit 1
+          fi
+          image="ghcr.io/cbg-innov/bip:$version"
+          if ! docker manifest inspect "$image" > /dev/null; then
+            echo "::error::$image is not on GHCR. Push the image before tagging the release."
+            exit 1
+          fi
+          echo "OK: releasing BIP $version+galaxy$suffix with $image"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install planemo
+        run: pip install planemo
+
+      # Only the API key is needed: planemo reads it from the environment, and the
+      # Tool Shed derives the account (which must equal `owner` in .shed.yml) from it.
+      - name: Update Tool Shed
+        env:
+          TOOLSHED_API_KEY: ${{ secrets.TOOLSHED_API_KEY }}
+        run: >
+          planemo shed_update
+          --shed_target toolshed
+          --shed_key_from_env TOOLSHED_API_KEY
+          --force_repository_creation
+          --check_diff
+          galaxy/bip

@@ -8,7 +8,7 @@ long_description: |
   PacBio, Oxford Nanopore, and generic single-end data. All dependencies and reference
   libraries ship inside a single Docker image on GHCR.
 homepage_url: https://github.com/cbg-innov/BIP
-remote_repository_url: https://github.com/cbg-innov/BIP
+remote_repository_url: https://github.com/cbg-innov/BIP/tree/main/galaxy/bip
 type: unrestricted
 categories:
   - Metagenomics
