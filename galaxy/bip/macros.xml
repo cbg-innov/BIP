@@ -1,0 +1,25 @@
+<macros>
+    <!-- BIP.sh reports "version 0.1"; bump VERSION_SUFFIX for wrapper-only changes. -->
+    <token name="@TOOL_VERSION@">0.1</token>
+    <token name="@VERSION_SUFFIX@">0</token>
+    <token name="@PROFILE@">24.0</token>
+
+    <xml name="requirements">
+        <requirements>
+            <!--
+              BIP ships as a single self-contained image on GHCR that already
+              bundles every R/Python/CLI dependency AND the reference libraries.
+              Galaxy's ExplicitDockerContainerResolver picks this up directly
+              (docker or singularity). See the CI note about pinning by digest
+              for full reproducibility instead of the mutable :latest tag.
+            -->
+            <container type="docker">ghcr.io/cbg-innov/bip:latest</container>
+        </requirements>
+    </xml>
+
+    <xml name="citations">
+        <citations>
+            <citation type="doi">10.64898/2026.07.21.739876</citation>
+        </citations>
+    </xml>
+</macros>

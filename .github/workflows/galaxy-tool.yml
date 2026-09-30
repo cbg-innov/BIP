@@ -1,0 +1,74 @@
+name: Galaxy tool (lint + test)
+
+on:
+  push:
+    paths:
+      - 'galaxy/**'
+      - '.github/workflows/galaxy-tool.yml'
+  pull_request:
+    paths:
+      - 'galaxy/**'
+      - '.github/workflows/galaxy-tool.yml'
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: planemo lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install planemo
+        run: pip install planemo
+      - name: Lint tool
+        run: planemo lint galaxy/bip/bip.xml
+
+  test:
+    name: planemo test (Docker container)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install planemo
+        run: pip install planemo
+
+      # ubuntu-latest ships with Docker; confirm the daemon is reachable.
+      - name: Check Docker
+        run: docker version
+
+      # Optional but recommended: pin the image to an immutable digest instead of
+      # the mutable :latest tag so CI (and users) always get a reproducible build.
+      # Uncomment and set the digest, then mirror it in macros.xml.
+      # - name: Pre-pull image
+      #   run: docker pull ghcr.io/cbg-innov/bip@sha256:<digest>
+
+      - name: Test tool inside its container
+        # --docker makes Galaxy's ExplicitDockerContainerResolver run the job in the
+        # image declared by <container type="docker"> in macros.xml.
+        run: >
+          planemo test
+          --docker
+          --galaxy_python_version 3.11
+          --test_output test_report.html
+          --test_output_json test_report.json
+          galaxy/bip/bip.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: planemo-test-report
+          path: |
+            test_report.html
+            test_report.json
+          if-no-files-found: ignore

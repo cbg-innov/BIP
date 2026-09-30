@@ -1,0 +1,220 @@
+<tool id="bip" name="BIP" version="@TOOL_VERSION@+galaxy@VERSION_SUFFIX@" profile="@PROFILE@">
+    <description>Barcode Inference Pipeline: from sequencer output to DNA barcodes</description>
+    <macros>
+        <import>macros.xml</import>
+    </macros>
+    <expand macro="requirements"/>
+    <!--
+      BIP.sh is a working-directory-scanning pipeline, not a flags-in/stdout tool:
+      it globs the working directory for *.fastq.gz / *.fastq and exactly one *.xlsx,
+      then writes everything into <RunName>_results/. This wrapper therefore (1) stages
+      the selected Galaxy datasets into a private scratch dir under fixed, glob-safe
+      names, (2) pins the run name to "bip" so all output paths are deterministic, and
+      (3) translates $GALAXY_SLOTS into BIP's cores_to_leave flag (BIP uses
+      nproc minus cores_to_leave threads, which would go negative on a low-core runner).
+    -->
+    <command detect_errors="exit_code"><![CDATA[
+## ---- private working directory that BIP.sh will scan ----
+mkdir -p bip_workdir &&
+wd="\$(pwd)/bip_workdir" &&
+
+## ---- respect Galaxy's core allocation ----
+## BIP has no "use N cores" flag, only "leave N free", so derive it from GALAXY_SLOTS.
+cores_total=\$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1) ;
+leave=\$(( cores_total - \${GALAXY_SLOTS:-1} )) ;
+if [ "\$leave" -lt 0 ] ; then leave=0 ; fi ;
+
+## ---- stage the parameters spreadsheet (BIP requires exactly one *.xlsx) ----
+ln -s '$parameters' "\$wd/parameters.xlsx" &&
+
+#if $dictionary
+## optional persistent primer dictionary
+ln -s '$dictionary' "\$wd/dictionary_BIP.tsv" &&
+#end if
+
+## ---- stage the sequencing reads ----
+#if $platform_cond.platform == 'illumina_pe'
+    ## Illumina PE: BIP requires EXACTLY two *.fastq.gz and globs them
+    ## alphabetically, so R1 must sort before R2.
+    ln -s '$platform_cond.reads_r1' "\$wd/reads_R1.fastq.gz" &&
+    ln -s '$platform_cond.reads_r2' "\$wd/reads_R2.fastq.gz" &&
+#else
+    ## Single-end platforms: one or more *.fastq.gz, concatenated by BIP.
+    #for $i, $r in enumerate($platform_cond.reads)
+        ln -s '$r' "\$wd/reads_${i}.fastq.gz" &&
+    #end for
+#end if
+
+## ---- run BIP inside its bundled conda env; "bip" is the fixed run name ----
+micromamba run -n bip bash /BIP/SCRIPTS/BIP.sh
+    --platform '$platform_cond.platform'
+    --minreads '$minreads'
+    --cores_to_leave "\$leave"
+#if str($advanced.customize) == 'yes'
+    --umi_overlap_min '$advanced.umi_overlap_min'
+    --primer_overlap_min '$advanced.primer_overlap_min'
+    --error_umi1 '$advanced.error_umi1'
+    --error_umi2 '$advanced.error_umi2'
+    --error_primer1 '$advanced.error_primer1'
+    --error_primer2 '$advanced.error_primer2'
+    --minreadssatellite '$advanced.minreadssatellite'
+    --minoverlap '$advanced.minoverlap'
+    --chimera_abskew '$advanced.chimera_abskew'
+    --chimera_mindiv '$advanced.chimera_mindiv'
+    --bin_maxhits '$advanced.bin_maxhits'
+    --bin_maxaccepts '$advanced.bin_maxaccepts'
+#end if
+    --wd "\$wd"
+    bip
+    < /dev/null
+    ]]></command>
+
+    <inputs>
+        <param name="parameters" type="data" format="xlsx" label="Parameters spreadsheet (.xlsx)"
+               help="The BIP parameters workbook with the 'UMIs and Primers' and 'Dictionary Update' tabs. Exactly one is required."/>
+
+        <conditional name="platform_cond">
+            <param name="platform" type="select" label="Sequencing platform"
+                   help="Determines R1/R2 merging (PEAR) and whether chimera screening runs early or late.">
+                <option value="nanopore">Oxford Nanopore (ONT)</option>
+                <option value="pacbio">PacBio</option>
+                <option value="illumina_pe">Illumina paired-end</option>
+                <option value="other">Other / generic single-end</option>
+            </param>
+            <when value="illumina_pe">
+                <param name="reads_r1" type="data" format="fastqsanger.gz" label="Forward reads (R1, FASTQ.gz)"/>
+                <param name="reads_r2" type="data" format="fastqsanger.gz" label="Reverse reads (R2, FASTQ.gz)"/>
+            </when>
+            <when value="nanopore">
+                <param name="reads" type="data" format="fastqsanger.gz" multiple="true"
+                       label="Reads (one or more FASTQ.gz)" help="Non-demultiplexed reads. Multiple files are concatenated."/>
+            </when>
+            <when value="pacbio">
+                <param name="reads" type="data" format="fastqsanger.gz" multiple="true"
+                       label="Reads (one or more FASTQ.gz)" help="Non-demultiplexed reads. Multiple files are concatenated."/>
+            </when>
+            <when value="other">
+                <param name="reads" type="data" format="fastqsanger.gz" multiple="true"
+                       label="Reads (one or more FASTQ.gz)" help="Non-demultiplexed reads. Multiple files are concatenated."/>
+            </when>
+        </conditional>
+
+        <param name="minreads" type="integer" value="5" min="1"
+               label="Minimum reads per OTU (--minreads)"
+               help="OTUs below this per-sample read count are discarded during clustering."/>
+
+        <param name="dictionary" type="data" format="tabular" optional="true"
+               label="Existing primer dictionary (dictionary_BIP.tsv, optional)"
+               help="A persistent dictionary_BIP.tsv from a previous run. New primer pairs from the spreadsheet's 'Dictionary Update' tab are merged into it."/>
+
+        <conditional name="advanced">
+            <param name="customize" type="select" label="Advanced tuning parameters">
+                <option value="no">Use BIP defaults</option>
+                <option value="yes">Set advanced parameters</option>
+            </param>
+            <when value="no"/>
+            <when value="yes">
+                <param name="umi_overlap_min" type="float" value="0.75" label="UMI overlap minimum (--umi_overlap_min)"
+                       help="Multiplier on UMI length during demultiplexing. 0.75 for UMIs >=12 nt, 1.0 for shorter."/>
+                <param name="primer_overlap_min" type="float" value="0.75" label="Primer overlap minimum (--primer_overlap_min)"/>
+                <param name="error_umi1" type="float" value="0.125" label="Forward UMI max error rate (--error_umi1)"/>
+                <param name="error_umi2" type="float" value="0.125" label="Reverse UMI max error rate (--error_umi2)"/>
+                <param name="error_primer1" type="float" value="0.2" label="Forward primer max error rate (--error_primer1)"/>
+                <param name="error_primer2" type="float" value="0.2" label="Reverse primer max error rate (--error_primer2)"/>
+                <!-- kept as text to preserve the exact scientific-notation default -->
+                <param name="minreadssatellite" type="text" value="0.00000625" label="Satellite-OTU read floor (--minreadssatellite)">
+                    <validator type="regex" message="Enter a positive number (decimal or scientific notation).">^[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$</validator>
+                </param>
+                <param name="minoverlap" type="float" value="0.75" label="Minimum overlap for BIN match (--minoverlap)"/>
+                <param name="chimera_abskew" type="float" value="10" label="Chimera abskew (--chimera_abskew)"/>
+                <param name="chimera_mindiv" type="float" value="0.0005" label="Chimera mindiv (--chimera_mindiv)"/>
+                <param name="bin_maxhits" type="integer" value="1" label="BIN match maxhits (--bin_maxhits)"/>
+                <param name="bin_maxaccepts" type="integer" value="1" label="BIN match maxaccepts (--bin_maxaccepts)"/>
+            </when>
+        </conditional>
+    </inputs>
+
+    <outputs>
+        <data name="report" format="pdf" label="${tool.name} on ${on_string}: Report (PDF)"
+              from_work_dir="bip_workdir/bip_results/bip_Report.pdf"/>
+        <data name="metrics" format="txt" label="${tool.name} on ${on_string}: publication metrics"
+              from_work_dir="bip_workdir/bip_results/publication_metrics.txt"/>
+        <data name="duration" format="txt" label="${tool.name} on ${on_string}: duration log"
+              from_work_dir="bip_workdir/bip_results/duration_log.txt"/>
+        <data name="raw_fastqs" format="binary" label="${tool.name} on ${on_string}: demultiplexed reads (tar.gz)"
+              from_work_dir="bip_workdir/bip_results/Individual_Raw_Fastq_Files.tar.gz"/>
+        <collection name="otu_details" type="list" label="${tool.name} on ${on_string}: OTU details per primer pair">
+            <discover_datasets pattern="(?P&lt;designation&gt;.+)__OTUDetails\.tsv"
+                               directory="bip_workdir/bip_results" recurse="true" format="tabular"/>
+        </collection>
+    </outputs>
+
+    <tests>
+        <!--
+          Full end-to-end run of the bundled Nanopore demo. Asserts only on the
+          deterministic, always-present outputs. After the first green CI run,
+          tighten this: add expect_num_outputs and an <output_collection ...
+          count="N"/> for otu_details once the demo's primer-pair count is known.
+        -->
+        <test>
+            <param name="parameters" value="parameters.xlsx"/>
+            <conditional name="platform_cond">
+                <param name="platform" value="nanopore"/>
+                <param name="reads" value="BAI109_demo.fastq.gz"/>
+            </conditional>
+            <param name="minreads" value="2"/>
+            <output name="metrics">
+                <assert_contents>
+                    <has_text text="BIP Run Parameters"/>
+                    <has_text text="Software versions"/>
+                    <has_text text="Platform:"/>
+                </assert_contents>
+            </output>
+            <output name="duration">
+                <assert_contents>
+                    <has_text text="Stage"/>
+                    <has_text text="Total"/>
+                </assert_contents>
+            </output>
+            <output name="report">
+                <assert_contents>
+                    <has_size min="1000"/>
+                </assert_contents>
+            </output>
+        </test>
+    </tests>
+
+    <help><![CDATA[
+**BIP — Barcode Inference Pipeline**
+
+BIP is a containerized DNA barcoding pipeline for any genetic marker, primer set, and
+second- or third-generation sequencing platform, with extra features for the COI-5P
+barcode region. It intakes raw, non-demultiplexed reads plus a parameters spreadsheet and
+produces per-well OTU tables with taxonomy, target/non-target status, quality metrics, and
+(COI-5P only) BOLD BIN assignments.
+
+**Inputs**
+
+* *Parameters spreadsheet (.xlsx)* — the BIP workbook (``UMIs and Primers`` + ``Dictionary Update`` tabs).
+* *Reads* — non-demultiplexed FASTQ.gz. For Illumina paired-end, supply R1 and R2; for
+  Nanopore/PacBio/other, supply one or more single-end FASTQ.gz files (concatenated).
+* *Primer dictionary* (optional) — a ``dictionary_BIP.tsv`` carried over from a previous run.
+
+**Outputs**
+
+* *Report (PDF)* — ``<run>_Report.pdf`` summary.
+* *Publication metrics* — parameters, software versions, and system info.
+* *Duration log* — per-stage timing.
+* *Demultiplexed reads (tar.gz)* — per-well reads, useful for SRA submission.
+* *OTU details* — a collection of per-primer-pair ``__OTUDetails.tsv`` tables.
+
+**Notes**
+
+The bundled COI BOLDistilled SINTAX reference library and the error-correction reference
+set are baked into the container image. To use a different reference library, set the
+``Reference Library`` field in the spreadsheet's ``Dictionary Update`` tab; supplying a
+custom reference FASTA to the container is not yet exposed through this wrapper.
+    ]]></help>
+
+    <expand macro="citations"/>
+</tool>

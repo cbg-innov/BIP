@@ -1,0 +1,18 @@
+name: bip
+owner: cbg-innov
+description: BIP — containerized DNA barcoding pipeline (sequencer output to DNA barcodes)
+long_description: |
+  BIP (Barcode Inference Pipeline) turns raw, non-demultiplexed sequencing reads and a
+  parameters spreadsheet into per-well OTU tables with taxonomy, target/non-target status,
+  quality metrics, and (for COI-5P) BOLD BIN assignments. It supports Illumina paired-end,
+  PacBio, Oxford Nanopore, and generic single-end data. All dependencies and reference
+  libraries ship inside a single Docker image on GHCR.
+homepage_url: https://github.com/cbg-innov/BIP
+remote_repository_url: https://github.com/cbg-innov/BIP
+type: unrestricted
+categories:
+  - Metagenomics
+  - Sequence Analysis
+auto_tool_repositories:
+  name_template: "{{ tool_id }}"
+  description_template: "{{ tool_name }} — Barcode Inference Pipeline"
