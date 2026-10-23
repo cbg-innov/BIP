@@ -78,7 +78,7 @@ mv "\$wd/results/${project_name}_Report.pdf" "\$wd/results/Report.pdf"
         <!-- BIP strips anything outside [[:alnum:]_.-] from the run name, so reject those
              characters up front; a leading '-' would be parsed by BIP.sh as an option. -->
         <param name="project_name" type="text" label="Project name"
-               help="Prefix for all outputs. Letters, digits, '_', '.' and '-' only; no spaces or slashes. Must not start with '.' or '-'.">
+               help="Prefix for all outputs.  Spaces or '/' are not allowed. Must not start with '.' or '-'.">
             <validator type="regex" message="Use only letters, digits, '_', '.' or '-' (no spaces or '/'), and don't start with '.' or '-'.">^[A-Za-z0-9_][A-Za-z0-9_.-]*$</validator>
         </param>
 
