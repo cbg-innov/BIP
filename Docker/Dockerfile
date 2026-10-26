@@ -16,6 +16,7 @@ RUN micromamba create -y -n bip -c conda-forge -c bioconda -c anaconda \
     python=3.11 \
     snakemake-minimal=9.16.3 \
     r-base=4.5.2 \
+    mafft=7.525.0 \
     pear=0.9.6 \
     seqkit=2.12.0 \
     libgcc=15.2.0 \
@@ -59,21 +60,6 @@ RUN micromamba create -y -n bip -c conda-forge -c bioconda -c anaconda \
     r-gridextra=2.3.1 \
     r-gtable=0.3.6 \
     && micromamba clean --all --yes
-
-# bioconductor-muscle has a bioconda build for linux-64 (amd64) but not for
-# linux-aarch64 (arm64). On amd64 install the prebuilt binary directly; on
-# arm64 compile it from source using the c-compiler/cxx-compiler toolchain
-# pulled in above.
-RUN if [ "$TARGETARCH" = "amd64" ]; then \
-        echo "Installing bioconductor-muscle from bioconda (amd64)"; \
-        micromamba install -y -n bip -c conda-forge -c bioconda -c anaconda bioconductor-muscle && \
-        micromamba clean --all --yes; \
-    else \
-        echo "Compiling muscle from source ($TARGETARCH)"; \
-        micromamba run -n bip Rscript -e ' \
-            if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager", repos = "https://cloud.r-project.org"); \
-            BiocManager::install("muscle", type = "source", update = FALSE, ask = FALSE)'; \
-    fi
 
 USER root
 

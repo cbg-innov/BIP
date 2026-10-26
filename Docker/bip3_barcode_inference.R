@@ -12,12 +12,37 @@ if(marker == "COI-5P"){
   marker <- TRUE
 }
 primers <- args[5]
+min_rank_match <- args[6]
+if (is.na(min_rank_match) || !nzchar(min_rank_match)) {
+  stop("min_rank_match (arg 6) is required: one of k, p, c, o, f, g, s")
+}
+min_rank_match <- tolower(min_rank_match)
+if (!min_rank_match %in% c("k", "p", "c", "o", "f", "g", "s")) {
+  stop(sprintf("invalid min_rank_match '%s': must be one of k, p, c, o, f, g, s", min_rank_match))
+}
+# In-frame COI-5P lengths, comma-separated; defined in the advanced parameters of BIP.sh.
+coi_expected_lengths <- args[7]
+if (is.na(coi_expected_lengths) || !nzchar(coi_expected_lengths)) {
+  stop("coi_expected_lengths (arg 7) is required: comma-separated integers, e.g. 640,643,646")
+}
+# --minreads from BIP.sh: OTUs left with fewer reads than this after negative-control
+# subtraction are removed.
+minreads_otu <- suppressWarnings(as.numeric(args[8]))
+if (is.na(minreads_otu)) {
+  stop("minreads (arg 8) is required: the --minreads value passed to BIP.sh")
+}
+expected_lengths <- suppressWarnings(
+  as.numeric(trimws(strsplit(coi_expected_lengths, ",")[[1]]))
+)
+if (length(expected_lengths) == 0 || anyNA(expected_lengths)) {
+  stop(sprintf("coi_expected_lengths must be a comma-separated list of integers (got '%s')",
+               coi_expected_lengths))
+}
 
 #set working directory based on plate's folder, load required libraries
 setwd(wkdir)
 library("Biostrings")
 library("readxl")
-library(muscle)
 library("dplyr")
 library("msa")
 library(stringr)
@@ -109,6 +134,131 @@ input.tax <- input.tax[
         input.tax[["Reverse Primer Name"]], sep = "_") == primers, ]
 input.tax <- input.tax[!duplicated(input.tax$Sample), ]
 
+# Target amplicon length drives the sequence-length tie-break during barcode inference.
+# It comes from the dictionary via parameters.tsv and is required.
+amplen_col <- "Target amplicon length"
+if (!amplen_col %in% names(input.tax)) {
+  stop(sprintf("required column '%s' not found in parameters.tsv", amplen_col))
+}
+target_lengths <- unique(suppressWarnings(as.numeric(input.tax[[amplen_col]])))
+target_lengths <- target_lengths[!is.na(target_lengths)]
+if (length(target_lengths) == 0) {
+  stop(sprintf("required column '%s' in parameters.tsv has no numeric value for primer pair %s",
+               amplen_col, primers))
+}
+if (length(target_lengths) > 1) {
+  warning(sprintf("primer pair %s has %d different '%s' values in parameters.tsv; using %s",
+                  primers, length(target_lengths), amplen_col, target_lengths[1]))
+}
+target_length <- target_lengths[1]
+
+# ---------------------------------------------------------------------------------------
+# Negative-control subtraction (plate-specific), before barcode inference
+# ---------------------------------------------------------------------------------------
+# A well is a control if its Negative Control value is yes, y or 1 (any case). Every OTU
+# from a control well is a contaminant: it is written to the ControlContaminants file and
+# removed from everything downstream (OTU table, target and NTS FASTA files). Every other
+# OTU on the SAME plate that matches a contaminant (vsearch, identity >= ctrl_match_id over
+# the whole alignment) loses the read count of its highest-read matching contaminant. OTUs
+# left with fewer than --minreads reads are removed. Read counts from here on are
+# post-subtraction.
+# Matching uses --iddef 1, which counts terminal gaps, so a partial fragment in a control
+# cannot match full-length OTUs. The 99% threshold is deliberately stricter than OTU
+# clustering, so conserved markers such as 18S, where related species can share >97%
+# identity, are not over-subtracted.
+ctrl_match_id <- 0.99
+is_control_value <- function(x) {
+  v <- tolower(trimws(as.character(x)))
+  !is.na(x) & (v %in% c("yes", "y") | grepl("^1(\\.0+)?$", v))
+}
+ctrl_samples <- input.tax$Sample[is_control_value(input.tax[["Negative Control"]])]
+sample_plate <- setNames(as.character(input.tax$Plate), input.tax$Sample)
+output$Plate <- as.character(unname(sample_plate[output$Sample]))
+output$Reads_Subtracted <- rep(0, nrow(output))
+is_ctrl_otu  <- output$Sample %in% ctrl_samples
+contaminants <- output[is_ctrl_otu, ]
+# rep(), not a bare 0: a run with no control-well OTUs gives a zero-row table
+contaminants$OTUs_Matched           <- rep(0, nrow(contaminants))
+contaminants$Reads_Subtracted_Total <- rep(0, nrow(contaminants))
+contaminants$OTUs_Removed           <- rep(0, nrow(contaminants))
+subtraction_log <- data.frame(RunID = character(0), Plate = character(0), Sample = character(0),
+                              OTU_Name = character(0), Reads_Before = numeric(0),
+                              Reads_Subtracted = numeric(0), Reads_After = numeric(0),
+                              Removed = logical(0), Matched_Control = character(0),
+                              Matched_Control_OTU = character(0), Pct_Identity = numeric(0),
+                              Sequence_Name = character(0), stringsAsFactors = FALSE)
+removed_by_sub <- rep(FALSE, nrow(output))
+
+cand <- which(!is_ctrl_otu & !is.na(output$Plate) & output$Plate %in% contaminants$Plate)
+if (nrow(contaminants) > 0 && length(cand) > 0) {
+  q <- DNAStringSet(output$Sequence[cand]);  names(q) <- paste0("q", seq_along(cand))
+  d <- DNAStringSet(contaminants$Sequence);  names(d) <- paste0("c", seq_len(nrow(contaminants)))
+  qf <- tempfile(fileext = ".fasta"); dbf <- tempfile(fileext = ".fasta"); hf <- tempfile(fileext = ".tsv")
+  writeXStringSet(q, qf); writeXStringSet(d, dbf)
+  # Exhaustive search (maxaccepts/maxrejects 0) so every matching contaminant is found.
+  status <- system2("vsearch", c("--usearch_global", qf, "--db", dbf, "--id", ctrl_match_id,
+                                 "--iddef", "1", "--maxaccepts", "0", "--maxrejects", "0",
+                                 "--strand", "plus", "--userout", hf,
+                                 "--userfields", "query+target+id", "--threads", "4", "--quiet"))
+  if (!identical(status, 0L)) stop("vsearch failed during negative-control matching")
+  hits <- if (file.exists(hf) && file.size(hf) > 0) {
+    read.delim(hf, header = FALSE, col.names = c("q", "c", "id"), stringsAsFactors = FALSE)
+  } else data.frame(q = character(0), c = character(0), id = numeric(0))
+  unlink(c(qf, dbf, hf))
+  if (nrow(hits) > 0) {
+    hits$oi <- cand[as.integer(sub("^q", "", hits$q))]          # row in output
+    hits$ci <- as.integer(sub("^c", "", hits$c))                # row in contaminants
+    hits <- hits[output$Plate[hits$oi] == contaminants$Plate[hits$ci], ]   # same plate only
+  }
+  if (nrow(hits) > 0) {
+    # each OTU is charged its highest-read matching contaminant on its plate
+    hits$creads <- contaminants$ReadCount[hits$ci]
+    hits <- hits[order(hits$oi, -hits$creads, -hits$id), ]
+    best <- hits[!duplicated(hits$oi), ]
+    before <- output$ReadCount[best$oi]
+    after  <- before - best$creads
+    gone   <- after < minreads_otu
+    subtraction_log <- data.frame(
+      RunID = runid, Plate = output$Plate[best$oi], Sample = output$Sample[best$oi],
+      OTU_Name = output$OTUName[best$oi], Reads_Before = before, Reads_Subtracted = best$creads,
+      Reads_After = pmax(after, 0), Removed = gone, Matched_Control = contaminants$Sample[best$ci],
+      Matched_Control_OTU = contaminants$OTUName[best$ci], Pct_Identity = best$id,
+      Sequence_Name = output$SeqName[best$oi], stringsAsFactors = FALSE)
+    output$ReadCount[best$oi]        <- pmax(after, 0)
+    output$Reads_Subtracted[best$oi] <- best$creads
+    removed_by_sub[best$oi]          <- gone
+    for (j in unique(best$ci)) {
+      k <- best$ci == j
+      contaminants$OTUs_Matched[j]           <- sum(k)
+      contaminants$Reads_Subtracted_Total[j] <- sum(pmin(best$creads[k], before[k]))
+      contaminants$OTUs_Removed[j]           <- sum(gone[k])
+    }
+    # keep the read count in each sequence name in step with the new count
+    hit_rows <- best$oi[!gone]
+    output$SeqName[hit_rows] <- mapply(function(n, r) sub("\\|reads-[0-9]+", paste0("|reads-", r), n),
+                                       output$SeqName[hit_rows], as.integer(output$ReadCount[hit_rows]),
+                                       USE.NAMES = FALSE)
+  }
+}
+contam_out <- data.frame(
+  RunID = rep(runid, nrow(contaminants)), Plate = contaminants$Plate,
+  Control_Sample = contaminants$Sample, OTU_Name = contaminants$OTUName,
+  Read_Count = contaminants$ReadCount, Sequence_Length = contaminants$SeqLength,
+  Kingdom = contaminants$Kingdom, Phylum = contaminants$Phylum, Class = contaminants$Class,
+  Order = contaminants$Order, Family = contaminants$Family, Genus = contaminants$Genus,
+  Species = contaminants$Species, OTUs_Matched_On_Plate = contaminants$OTUs_Matched,
+  Reads_Subtracted_Total = contaminants$Reads_Subtracted_Total,
+  OTUs_Removed = contaminants$OTUs_Removed, Sequence_Name = contaminants$SeqName,
+  Sequence = contaminants$Sequence, stringsAsFactors = FALSE)
+write.table(contam_out, sprintf("%s__%s__ControlContaminants.tsv", runid, primers),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+write.table(subtraction_log, sprintf("%s__%s__ControlSubtraction.tsv", runid, primers),
+            quote = FALSE, row.names = FALSE, sep = "\t")
+cat(sprintf("Negative controls (%s): %d control OTU(s) on %d plate(s); %d OTU(s) had reads subtracted, %d removed (< %d reads)\n",
+            primers, nrow(contaminants), length(unique(contaminants$Plate)),
+            nrow(subtraction_log), sum(subtraction_log$Removed), as.integer(minreads_otu)))
+output <- output[!is_ctrl_otu & !removed_by_sub, ]
+
 input.tax.table <- input.tax[,c("Sample","Kingdom","Phylum","Class","Order","Family","Genus","Species")]
 names(input.tax.table) <- c("Sample","USER.Kingdom","USER.Phylum","USER.Class","USER.Order","USER.Family","USER.Genus","USER.Species")
 input.tax.table$USER.Kingdom[is.na(input.tax.table$USER.Kingdom) | input.tax.table$USER.Kingdom == ""] <- "unknown"
@@ -168,21 +318,38 @@ output[, rank_match_cols] <- lapply(output[, rank_match_cols], function(col) {
   replace(col, is.na(col), "UNKNOWN")
 })
 
-# Tax_Match based on high ranks only (Kingdom–Order); Family/Genus/Species → LowRankScore
-high_cols <- c("Kingdom_Match", "Phylum_Match", "Class_Match", "Order_Match")
+# Tax_Match is enforced from Kingdom down to --min_rank_match: a mismatch at or above
+# that rank blocks target designation. Ranks below it cannot block it, and instead
+# contribute to LowRankScore, the first tie-breaker between candidate OTUs.
+min_rank <- unname(rank_prefix_map[min_rank_match])
+if (is.na(min_rank)) {
+  stop(sprintf("invalid min_rank_match '%s': must be one of %s",
+               min_rank_match, paste(names(rank_prefix_map), collapse = ", ")))
+}
+min_rank_i <- match(min_rank, ranks)
+
+high_cols <- rank_match_cols[seq_len(min_rank_i)]
+low_cols  <- if (min_rank_i < length(ranks)) {
+  rank_match_cols[(min_rank_i + 1):length(ranks)]
+} else {
+  character(0)
+}
+
 output$Tax_Match <- ifelse(
-  apply(output[, high_cols] == "MISMATCH", 1, any), "MISMATCH",
+  apply(output[, high_cols, drop = FALSE] == "MISMATCH", 1, any), "MISMATCH",
   ifelse(
-    apply(output[, high_cols] == "UNKNOWN", 1, any), "UNKNOWN",
+    apply(output[, high_cols, drop = FALSE] == "UNKNOWN", 1, any), "UNKNOWN",
     "OK"
   )
 )
 
-low_cols <- c("Family_Match", "Genus_Match", "Species_Match")
-output$LowRankScore <- rowSums(
-  sapply(output[, low_cols], function(x) ifelse(x == "OK", 1L, 0L)),
-  na.rm = TRUE
-)
+# No ranks below the enforced one means nothing is left to score, so every OTU ties here.
+output$LowRankScore <- if (length(low_cols) == 0) {
+  rep(0L, nrow(output))
+} else {
+  Reduce(`+`, lapply(output[, low_cols, drop = FALSE],
+                     function(x) as.integer(!is.na(x) & x == "OK")))
+}
 
 # add dominant tag to output table
 output <- output[order(output$Sample, -output$ReadCount),]
@@ -198,9 +365,19 @@ for(i in 1:(nrow(output)-1)){
   }
 }
 
-# add INDEL tag to table (default to FALSE if not COI-658)
-expected_lengths <- c(640, 643, 646, 649, 652, 655, 658, 661, 664, 667, 670)
-ifelse(marker=="TRUE",
+# The in-frame COI checks below (indel flag, NUMT category, mtCOI required for a target)
+# assume a full-length barcode, so they apply only when this primer pair's target amplicon
+# length lies inside the coi_expected_lengths range - the same condition BIP.sh uses to
+# decide whether bip2 runs. A shorter COI amplicon (e.g. 418 bp) is judged like any other
+# marker; it still gets the COI output columns.
+min_expected_length <- min(expected_lengths)
+max_expected_length <- max(expected_lengths)
+full_length_coi <- marker == "TRUE" &&
+  target_length >= min_expected_length && target_length <= max_expected_length
+
+# add INDEL tag to table (default to FALSE if not full-length COI)
+# expected_lengths comes from coi_expected_lengths in the advanced parameters of BIP.sh
+ifelse(full_length_coi,
        output$INDEL <- ifelse(output$SeqLength %in% expected_lengths, FALSE, TRUE),
        output$INDEL <- FALSE)
 output$HMM <- ifelse(output$INDEL == FALSE & output$STOPCODON == FALSE, "OK", "HMM_ISSUE")
@@ -217,9 +394,11 @@ parse_sintax <- function(tax_string) {
     rank   <- rank_prefix_map[prefix]
     if (is.na(rank)) next
     inner  <- sub("^[^:]+:", "", part)
-    value  <- sub("\\(.*", "", inner)
-    prob_m <- regmatches(inner, regexpr("(?<=\\().*(?=\\))", inner, perl = TRUE))
-    prob   <- if (length(prob_m) == 1) prob_m else NA_character_
+    # SINTAX appends the probability as "(0.51)"; split on that final bracket only,
+    # because library names can contain brackets, e.g. "Homo_sapiens_(human)".
+    m      <- regmatches(inner, regexec("^(.*)\\(([0-9.eE+-]+)\\)$", inner))[[1]]
+    value  <- if (length(m) == 3) m[2] else inner
+    prob   <- if (length(m) == 3) m[3] else NA_character_
     result[paste0("SINTAX_", rank)]          <- value
     result[paste0("SINTAX_", rank, "_Prob")] <- prob
   }
@@ -235,9 +414,11 @@ df_split <- as.data.frame(
 output <- cbind(output, df_split)
 
 # add OTU category to table
-output$OTUCategory <- if(marker == "TRUE"){
-                            ifelse(output$SeqLength < 640, "NUMT",
-                              ifelse(output$SeqLength > 670, "NUMT",
+# A sequence outside the range spanned by coi_expected_lengths (set in the advanced
+# parameters of BIP.sh) is too short or too long to be a real barcode, so it is a NUMT.
+output$OTUCategory <- if(full_length_coi){
+                            ifelse(output$SeqLength < min_expected_length, "NUMT",
+                              ifelse(output$SeqLength > max_expected_length, "NUMT",
                                 ifelse(output$INDEL == FALSE & output$STOPCODON == TRUE, "NUMT",
                                     ifelse(output$HMM != "HMM_ISSUE", "mtCOI", "unknown"))))
 } else{
@@ -257,7 +438,7 @@ output <- data.frame(output %>%
                        select(-should_remove))
 
 # select the target barcode sequence (if possible)
-if(marker == "TRUE"){
+if(full_length_coi){
   output$OTUDestination <- ifelse(output$Kingdom == "unknown", "NTS",
                                        ifelse(output$OTUCategory != "mtCOI", "NTS",
                                             ifelse(output$Tax_Match == "MISMATCH", "NTS",
@@ -274,15 +455,21 @@ output <- output %>%
   group_by(Sample) %>%
   group_modify(~{
     df <- .x
+    # Tie-breaking, in order: matches at ranks below --min_rank_match, then distance
+    # from the target amplicon length (so 655 beats 664 against a 658 target), then
+    # ambiguous bases, then read count. OTUs equidistant from the target length stay
+    # tied on length and are separated by the criteria that follow.
     candidates <- df %>%
       filter(OTUDestination == "target") %>%
-      arrange(desc(LowRankScore), Ns, desc(ReadCount))
+      mutate(LengthDist = abs(SeqLength - target_length)) %>%
+      arrange(desc(LowRankScore), LengthDist, Ns, desc(ReadCount))
 
     if (nrow(candidates) == 0) return(df)
 
     top <- candidates[1, ]
     tied <- candidates %>%
       filter(LowRankScore == top$LowRankScore,
+             LengthDist    == top$LengthDist,
              Ns            == top$Ns,
              ReadCount     == top$ReadCount)
 
@@ -354,7 +541,8 @@ if(marker == "TRUE"){
       Order_Match,
       Family_Match,
       Genus_Match,
-      Species_Match)
+      Species_Match,
+      Reads_Subtracted)
 } else{
   output <- output %>%
     select(
@@ -396,7 +584,8 @@ if(marker == "TRUE"){
       Order_Match,
       Family_Match,
       Genus_Match,
-      Species_Match)
+      Species_Match,
+      Reads_Subtracted)
 }
 output <- output %>%
   group_by(Sample) %>%

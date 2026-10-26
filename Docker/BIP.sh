@@ -1,5 +1,7 @@
 #!/bin/bash
-# version 0.1
+# BIP version: the single place it is defined. Bump it for each release; it is written
+# to publication_metrics.txt so every run records the version that produced it.
+BIP_VERSION="1.1.0"
 # Usage: bash BIP.sh --platform <illumina_pe|pacbio|nanopore|other> [options] <RunName>
 # Run with no arguments (other than --platform/<RunName>) to use the defaults below.
 
@@ -15,9 +17,31 @@ scripts_directory="${scripts_directory:-/BIP/SCRIPTS}"
 reference_library_directory="${reference_library_directory:-/BIP/REFS}"
 ref_seq_corr="${ref_seq_corr:-}"
 
+# Where the input reads and the parameters workbook live. Both default to the working
+# directory (--wd). --fastq takes a directory holding the .fastq/.fastq.gz files; --params
+# takes the .xlsx file itself, or a directory holding exactly one .xlsx. Relative paths are
+# taken from the directory BIP is launched in. Reads in a --fastq directory other than the
+# working directory are only read, never modified.
+fastq_dir="${fastq_dir:-}"
+param_path="${param_path:-}"
+
+# Taxonomic rank at which the user-supplied identification is enforced during barcode
+# inference. An OTU whose taxonomy mismatches the specimen at this rank, or at any rank
+# above it, cannot be designated as the target barcode. Ranks BELOW this one do not
+# prevent target designation; they are used to break ties between candidate OTUs.
+# Ranks use the same letters as SINTAX: k, p, c, o, f, g, s. Default is o (order).
+min_rank_match="${min_rank_match:-o}"
+
 platform=""
 minreads=5
 runid=""
+
+# SINTAX taxonomy assignment. FALSE (default): one thread with a fixed random seed, so the
+# same input always gives the same taxonomy and probabilities. TRUE: all available cores
+# and no fixed seed, which is faster but lets results vary slightly from run to run.
+parallel_sintax="${parallel_sintax:-FALSE}"
+# Seed used when parallel_sintax is FALSE.
+sintax_randseed=1
 
 #~#~#~#~#~#~#~#~#~#~#
 # Advanced parameters
@@ -43,6 +67,11 @@ chimera_mindiv=0.0005
 # Parameters for VSEARCH's usearch_global command (BIN matching).
 bin_maxhits=1
 bin_maxaccepts=1
+# In-frame sequence lengths accepted for the protein-coding COI-5P marker. An OTU whose
+# length is not in this list is flagged as an indel (and typed as a NUMT), which makes it
+# ineligible as a target barcode. Comma-separated integers, passed to bip3. Update this
+# list as more becomes known about legitimate COI-5P barcode lengths.
+coi_expected_lengths=640,643,646,649,652,655,658,661,664,667,670,673
 
 # ---------------------------
 # Parse arguments properly
@@ -60,6 +89,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --minreads)
             minreads="$2"
+            shift 2
+            ;;
+        --fastq)
+            fastq_dir="$2"
+            shift 2
+            ;;
+        --params)
+            param_path="$2"
+            shift 2
+            ;;
+        --min_rank_match)
+            min_rank_match="$2"
             shift 2
             ;;
         --wd)
@@ -130,6 +171,14 @@ while [[ $# -gt 0 ]]; do
             bin_maxaccepts="$2"
             shift 2
             ;;
+        --coi_expected_lengths)
+            coi_expected_lengths="$2"
+            shift 2
+            ;;
+        --parallel_sintax)
+            parallel_sintax="$2"
+            shift 2
+            ;;
         -*)
             echo "ERROR: Unknown option $1"
             echo "Usage: bash BIP.sh --platform <illumina_pe|pacbio|nanopore|other> [options] <RunName>"
@@ -158,7 +207,67 @@ if [[ -z "$platform" ]]; then
     exit 1
 fi
 
+# Accept either the SINTAX rank letter or the full rank name, any case; store the letter.
+min_rank_match="$(printf '%s' "$min_rank_match" | tr '[:upper:]' '[:lower:]')"
+case "$min_rank_match" in
+    k|kingdom) min_rank_match=k ;;
+    p|phylum)  min_rank_match=p ;;
+    c|class)   min_rank_match=c ;;
+    o|order)   min_rank_match=o ;;
+    f|family)  min_rank_match=f ;;
+    g|genus)   min_rank_match=g ;;
+    s|species) min_rank_match=s ;;
+    *)
+        echo "ERROR: Invalid --min_rank_match '$min_rank_match'. Must be one of: k, p, c, o, f, g, s"
+        exit 1
+        ;;
+esac
+
+case "${parallel_sintax^^}" in
+    TRUE|T)  parallel_sintax=TRUE ;;
+    FALSE|F) parallel_sintax=FALSE ;;
+    *)
+        echo "ERROR: Invalid --parallel_sintax '$parallel_sintax'. Must be TRUE or FALSE"
+        exit 1
+        ;;
+esac
+
+if [[ ! "$coi_expected_lengths" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    echo "ERROR: coi_expected_lengths must be a comma-separated list of integers (got '$coi_expected_lengths')"
+    exit 1
+fi
+
+# Bounds of the in-frame COI-5P window, used to gate the steps that only make sense for a
+# full-length barcode. Derived here so coi_expected_lengths stays the single definition.
+coi_min_expected=$(printf '%s' "$coi_expected_lengths" | tr ',' '\n' | sort -n | head -1)
+coi_max_expected=$(printf '%s' "$coi_expected_lengths" | tr ',' '\n' | sort -n | tail -1)
+
+# Resolve --fastq / --params to absolute paths now, while a relative path still means the
+# directory BIP was launched from (the script changes into the working directory below).
+if [[ -n "$fastq_dir" ]]; then
+    if [[ ! -d "$fastq_dir" ]]; then
+        echo "ERROR: --fastq must be a directory containing the .fastq/.fastq.gz files (got '$fastq_dir')"
+        exit 1
+    fi
+    fastq_dir="$(cd "$fastq_dir" && pwd)"
+fi
+if [[ -n "$param_path" ]]; then
+    if [[ -d "$param_path" ]]; then
+        param_path="$(cd "$param_path" && pwd)"
+    elif [[ -f "$param_path" ]]; then
+        param_path="$(cd "$(dirname "$param_path")" && pwd)/$(basename "$param_path")"
+    else
+        echo "ERROR: --params not found: '$param_path' (give the .xlsx file, or a directory holding one)"
+        exit 1
+    fi
+fi
+
 cores=$(($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu) - $cores_to_leave))
+if [[ "$parallel_sintax" == "TRUE" ]]; then
+    sintax_opts=(--threads "$cores")
+else
+    sintax_opts=(--threads 1 --randseed "$sintax_randseed")
+fi
 
 cd "$wkdir"
 
@@ -331,6 +440,12 @@ log_step() {
     printf "%-30s %-22s %-22s %-15s\n" "$stage" "$start_label" "$end_label" "$dur" >> $wkdir/duration_log.txt
 }
 
+# Primer pairs whose BIN matching failed. The run still finishes, then reports them and
+# exits with an error (see the end of the script).
+bin_failures=()
+# Primer pairs where almost no reads matched a UMI pair, repeated at the end of the run.
+umi_warnings=()
+
 process_all_primers() {
     for d in */; do
         name="${d%/}"
@@ -340,13 +455,17 @@ process_all_primers() {
     done
 }
 
-sampletask() {
+# Per-sample OTU work. Runs inside the sample's own private folder (see sampletask below),
+# so every file listing here sees only this sample's files. Records how it ended in
+# <sampleid>.status: ok, no_otus, or error: <reason>.
+sampletask_core() {
 
     local fasta="$1"
     local sampleid="${fasta%.fasta}"
 
     if ! grep -q '^>' "${fasta}"; then
         echo "No OTUs remaining for $sampleid after primary clustering"
+        echo "no_otus" > "${sampleid}.status"
         return
     fi
 
@@ -422,8 +541,10 @@ sampletask() {
     /^>/ {
         n=1
 
-        if (match($0, /;size=([0-9]+)/, a)) {
-            n=a[1]
+        # POSIX match() + RSTART/RLENGTH, so this works in mawk (the Docker image) as well
+        # as gawk; ";size=" is 6 characters.
+        if (match($0, /;size=[0-9]+/)) {
+            n=substr($0, RSTART+6, RLENGTH-6)
         }
 
         sum+=n
@@ -433,6 +554,15 @@ sampletask() {
         print sum
     }
     ' "$fasta" > "${sampleid}_afterchimerareadcount.tmp"
+
+    # Nothing may survive dereplication (reads under vsearch's 32 nt minimum) or chimera
+    # screening. Clustering an empty file writes an empty .uc, which the check below would
+    # report as a vsearch failure, so record that the sample has no OTUs instead.
+    if ! grep -q '^>' "$fasta"; then
+        echo "No OTUs remaining for $sampleid after dereplication and chimera screening"
+        echo "no_otus" > "${sampleid}.status"
+        return
+    fi
 
     # ---------------------------
     # Primary OTU clustering
@@ -445,19 +575,45 @@ sampletask() {
     vsearch --cluster_fast "$fasta" \
         --id "$primaryclust" \
         --clusters "${sampleid}_OTU" \
+        --uc "${sampleid}_primary.uc" \
         --iddef 3 \
         --threads 1
 
     # ---------------------------
-    # Remove low-depth OTUs
+    # Collect the cluster files once, by exact name (<sampleid>_OTU<number>), and check the
+    # count against vsearch's own cluster count. Collecting before any renaming means a
+    # renamed file can never be picked up a second time.
     # ---------------------------
 
-    find . -type f -name "${sampleid}_OTU*" | while IFS= read -r file; do
+    local f n otu_files=() kept=()
+    for f in "${sampleid}"_OTU*; do
+        n="${f#"${sampleid}_OTU"}"
+        [[ -f "$f" && "$n" =~ ^[0-9]+$ ]] && otu_files+=("$f")
+    done
+    # vsearch writes a line per read to the .uc file, so a missing or empty one means it failed.
+    if [[ ! -s "${sampleid}_primary.uc" ]]; then
+        echo "error: primary clustering (vsearch) produced no output" > "${sampleid}.status"
+        return
+    fi
+    n=$(awk '$1 == "C"' "${sampleid}_primary.uc" | wc -l)
+    rm -f "${sampleid}_primary.uc"
+    if [[ "${#otu_files[@]}" -ne "$n" ]]; then
+        echo "error: primary clustering made $n clusters but ${#otu_files[@]} cluster files were found" > "${sampleid}.status"
+        return
+    fi
 
-        read_count=$(grep -c "^>" "$file")
+    # ---------------------------
+    # Remove low-depth OTUs. --minreads counts READS: each record is a dereplicated sequence
+    # carrying ;size=N, so the reads in a cluster are the sum of its sizes, not its records.
+    # ---------------------------
 
+    local read_count
+    for f in "${otu_files[@]}"; do
+        read_count=$(awk '/^>/ { n = 1; if (match($0, /;size=[0-9]+/)) n = substr($0, RSTART+6, RLENGTH-6); s += n } END { print s+0 }' "$f")
         if [[ "$read_count" -lt "$minreads" ]]; then
-            rm -f "$file"
+            rm -f "$f"
+        else
+            kept+=("$f")
         fi
     done
 
@@ -465,17 +621,18 @@ sampletask() {
     # Stop if no OTUs remain
     # ---------------------------
 
-    if ! compgen -G "${sampleid}_OTU*" > /dev/null; then
+    if [[ "${#kept[@]}" -eq 0 ]]; then
         echo "No OTUs remaining for $sampleid after minreads filtering"
+        echo "no_otus" > "${sampleid}.status"
         return
     fi
 
     # ---------------------------
-    # Rename OTU read files
+    # Rename OTU read files (explicit list)
     # ---------------------------
 
-    find . -type f -name "${sampleid}_OTU*" | while IFS= read -r file; do
-        mv "$file" "${file}_Reads.fasta"
+    for f in "${kept[@]}"; do
+        mv "$f" "${f}_Reads.fasta"
     done
 
     # ---------------------------
@@ -495,17 +652,34 @@ sampletask() {
     vsearch --cluster_fast "${sampleid}_OTUs.tmp" \
         --id "$finalclust" \
         --clusters "${sampleid}_FinalOTU" \
+        --uc "${sampleid}_final.uc" \
         --iddef 3 \
         --threads 1
 
     rm -f "${sampleid}_OTUs.tmp"
 
     # ---------------------------
-    # Rename secondary OTUs
+    # Rename secondary OTUs (explicit list, checked against vsearch's cluster count)
     # ---------------------------
 
-    find . -type f -name "${sampleid}_FinalOTU*" | while IFS= read -r file; do
-        mv "$file" "${file}_Reads.fasta"
+    local final_files=()
+    for f in "${sampleid}"_FinalOTU*; do
+        n="${f#"${sampleid}_FinalOTU"}"
+        [[ -f "$f" && "$n" =~ ^[0-9]+$ ]] && final_files+=("$f")
+    done
+    # vsearch writes a line per read to the .uc file, so a missing or empty one means it failed.
+    if [[ ! -s "${sampleid}_final.uc" ]]; then
+        echo "error: secondary clustering (vsearch) produced no output" > "${sampleid}.status"
+        return
+    fi
+    n=$(awk '$1 == "C"' "${sampleid}_final.uc" | wc -l)
+    rm -f "${sampleid}_final.uc"
+    if [[ "${#final_files[@]}" -ne "$n" ]]; then
+        echo "error: secondary clustering made $n clusters but ${#final_files[@]} cluster files were found" > "${sampleid}.status"
+        return
+    fi
+    for f in "${final_files[@]}"; do
+        mv "$f" "${f}_Reads.fasta"
     done
 
     # ---------------------------
@@ -550,6 +724,42 @@ sampletask() {
 
     rename 's/FinalOTU/OTU/g' "${sampleid}"_FinalOTU*_Reads.fasta
     rename 's/.fasta/.fas/g' "${sampleid}"_OTU*_Reads.fasta
+
+    echo "ok" > "${sampleid}.status"
+}
+
+# Run one sample's OTU work in its own folder, otu_work/<sampleid>/, then move its outputs
+# back. Many samples run at once; when they all worked in the shared primer folder, a
+# directory listing taken while other jobs were creating, renaming and deleting files could
+# miss this sample's files on some filesystems (seen on Docker Desktop bind mounts on macOS),
+# silently dropping reads. A private folder is only ever touched by its own job. A sample that
+# does not finish cleanly leaves <sampleid>.otu_failed, which stops the run after the step.
+sampletask() {
+
+    local fasta="$1"
+    local sampleid="${fasta%.fasta}"
+    local sdir="otu_work/${sampleid}"
+    local status f
+
+    if ! mkdir -p "$sdir" || ! mv -- "$fasta" "$sdir/"; then
+        echo "could not set up $sdir" > "${sampleid}.otu_failed"
+        return
+    fi
+
+    ( cd "$sdir" && sampletask_core "$fasta" )
+
+    status=$(cat "$sdir/${sampleid}.status" 2>/dev/null)
+    rm -f "$sdir/${sampleid}.status"
+    for f in "$sdir"/*; do
+        [[ -e "$f" ]] && mv -- "$f" .
+    done
+    rmdir "$sdir" 2>/dev/null
+
+    case "$status" in
+        ok|no_otus) ;;
+        "")         echo "OTU step did not finish" > "${sampleid}.otu_failed" ;;
+        *)          echo "$status" > "${sampleid}.otu_failed" ;;
+    esac
 }
 
 process_primer_dir() {
@@ -725,6 +935,18 @@ process_primer_dir() {
         linked_count=$((linked_count + c))
     done
     echo -e "${runid}\tLinkedUMI\t${name}\t${linked_count}" >> "$counts_file"
+
+    # Almost no reads matching a UMI pair usually means the parameters file's UMIs don't
+    # match the reads, most often Reverse UMIs entered in the wrong orientation.
+    len_count=$(seqkit stats -T "$len_fq" | awk 'NR==2 {print $4}')
+    if (( len_count > 0 && linked_count * 100 < len_count )); then
+        umi_msg="$name: only $linked_count of $len_count reads ($(awk -v a="$linked_count" -v b="$len_count" 'BEGIN { printf "%.2f", 100 * a / b }')%) matched a UMI pair"
+        echo "WARNING: $umi_msg"
+        echo "  Check the UMIs in the parameters file. Reverse UMIs must be entered 5'->3' as on the"
+        echo "  reverse primer oligo, i.e. reverse-complemented relative to how they appear at the end"
+        echo "  of a read in the forward-primer orientation."
+        umi_warnings+=("$umi_msg")
+    fi
 
 
     # ---------------------------
@@ -977,14 +1199,73 @@ process_primer_dir() {
 
     T=$(date +%s); TL=$(date "+%Y-%m-%d %H:%M:%S")
 
+    # Samples run in parallel, so each writes to its own log and only this loop prints to the
+    # terminal: one line per sample as it finishes. The logs are combined into one file after.
+    local fastas=() sid pid otus result secs i=0 done_n=0
+    local -A job_sample=() job_start=()
     for fasta in *.fasta; do
-        [ -e "$fasta" ] || continue
-        sampletask "$fasta" &
-        while [[ $(jobs -r -p | wc -l) -ge $cores ]]; do
-            sleep 0.2
-        done
+        [ -e "$fasta" ] && fastas+=("$fasta")
     done
-    wait
+    local n=${#fastas[@]}
+    mkdir -p otu_logs
+    echo -e "\n******** OTU clustering ${n} samples for ${name}, up to ${cores} at a time"
+
+    while (( i < n || ${#job_sample[@]} )); do
+        if (( i < n && ${#job_sample[@]} < cores )); then
+            sid="${fastas[i]%.fasta}"
+            sampletask "${fastas[i]}" > "otu_logs/${sid}.log" 2>&1 &
+            job_sample[$!]="$sid"
+            job_start[$!]=$SECONDS
+            (( i++ ))
+            continue
+        fi
+
+        pid=
+        wait -n -p pid
+        [[ -n "$pid" && -n "${job_sample[$pid]:-}" ]] || continue
+        sid="${job_sample[$pid]}"
+        secs=$(( SECONDS - job_start[$pid] ))
+        unset "job_sample[$pid]" "job_start[$pid]"
+        (( done_n++ ))
+
+        if [[ -f "${sid}.otu_failed" ]]; then
+            result="FAILED ($(cat "${sid}.otu_failed"))"
+        else
+            otus=( "${sid}"_OTU*_Reads.fas )
+            [[ -e "${otus[0]}" ]] && result="${#otus[@]} OTU(s)" || result="no OTUs"
+        fi
+        printf '  [%*d/%d] %-30s %-10s %4ss\n' "${#n}" "$done_n" "$n" "${sid%__"$name"}" "$result" "$secs"
+        if [[ -f "${sid}.otu_failed" ]]; then
+            tail -n 15 "otu_logs/${sid}.log" | sed 's/^/        | /'
+        fi
+    done
+
+    for fasta in "${fastas[@]}"; do
+        sid="${fasta%.fasta}"
+        echo "=================== ${sid} ==================="
+        cat "otu_logs/${sid}.log" 2>/dev/null
+        echo
+    done > "${name}_OTU_clustering.log"
+    rm -rf otu_logs
+    echo "  Full per-sample output: ${runid}_results/${name}/${name}_OTU_clustering.log"
+
+    # Every sample must have finished its OTU step cleanly. Stop rather than continue with
+    # samples silently missing from the results.
+    failed=(*.otu_failed)
+    leftover=()
+    for f in *_OTU* *_FinalOTU*; do
+        [[ "$f" =~ _(Final)?OTU[0-9]+$ ]] && leftover+=("$f")
+    done
+    if (( ${#failed[@]} )) || (( ${#leftover[@]} )) || [[ -n "$(ls -A otu_work 2>/dev/null)" ]]; then
+        echo "ERROR: the OTU step did not complete for every sample (primer pair $name):"
+        for f in "${failed[@]}"; do echo "  ${f%.otu_failed}: $(cat "$f")"; done
+        (( ${#leftover[@]} )) && echo "  unprocessed cluster files: ${leftover[*]}"
+        [[ -n "$(ls -A otu_work 2>/dev/null)" ]] && echo "  sample work folders left in otu_work/: $(ls otu_work | tr '\n' ' ')"
+        echo "  Results would be incomplete, so BIP has stopped. Re-run, and if it recurs, use fewer"
+        echo "  cores (--cores_to_leave) or a working directory on a native filesystem."
+        exit 1
+    fi
+    rmdir otu_work 2>/dev/null
 
     T2=$(date +%s); T2L=$(date "+%Y-%m-%d %H:%M:%S")
     log_step "${name}:OTU clustering" "$TL" "$T2L" $(( T2 - T ))
@@ -1058,7 +1339,7 @@ process_primer_dir() {
     # Indel correction, NUMT detection (only if COI-5P and full-length barcode)
     # ---------------------------
 
-    if [[ "$marker" == "COI-5P" ]] && (( ampsize >= 640 && ampsize <= 670 )); then
+    if [[ "$marker" == "COI-5P" ]] && (( ampsize >= coi_min_expected && ampsize <= coi_max_expected )); then
         T=$(date +%s); TL=$(date "+%Y-%m-%d %H:%M:%S")
 
         echo -e "******** Auto-trim and indel correction"
@@ -1076,7 +1357,7 @@ process_primer_dir() {
             fi
             errcorr_ref="${errcorr_refs[0]}"
         fi
-        python3.11 "$scripts_directory/bip2_homopolymer_error_fix.py" "$runid".fasta "$errcorr_ref"
+        python3.11 "$scripts_directory/bip2_homopolymer_error_fix.py" "$runid".fasta "$errcorr_ref" "$coi_expected_lengths"
 
         # combine trimmed/corrected and un-trimmed/un-corrected sequences into a single FASTA file
         awk '/^>/{if (seq) print seq; print; seq=""; next} {seq=seq $0} END{print seq}' problem_seqs.fasta > problem_seqs_singleline.fasta
@@ -1150,7 +1431,7 @@ process_primer_dir() {
         --tabbedout "$runid".table \
         --strand plus \
         --sintax_cutoff $tax_prob \
-        --threads $cores
+        "${sintax_opts[@]}"
 
     # reformat tax id table
     echo -e "******** Reformatting SINTAX ID table"
@@ -1164,7 +1445,7 @@ process_primer_dir() {
 
     echo -e "******** Inferring barcodes"
     inputreadcount=$(awk 'NR==2 {print $4}' $counts_file)
-    Rscript $scripts_directory/bip3_barcode_inference.R "$runid" "$(pwd)" "$(echo "$inputreadcount * $minreadssatellite" | bc -l)" "$marker" "$name"
+    Rscript $scripts_directory/bip3_barcode_inference.R "$runid" "$(pwd)" "$(echo "$inputreadcount * $minreadssatellite" | bc -l)" "$marker" "$name" "$min_rank_match" "$coi_expected_lengths" "$minreads"
 
     T2=$(date +%s); T2L=$(date "+%Y-%m-%d %H:%M:%S")
     log_step "${name}:Barcode inference" "$TL" "$T2L" $(( T2 - T ))
@@ -1182,19 +1463,28 @@ process_primer_dir() {
         if [[ ! -f "$vsearch_udb" ]]; then
             echo -e "******** Creating vsearch UDB from reference library..."
             sed '/^>/ s/ /_/g' "$sintax_fasta" > sintax_nospaces.fasta
-            vsearch --makeudb_usearch sintax_nospaces.fasta --output "$vsearch_udb" --threads $cores
+            if ! vsearch --makeudb_usearch sintax_nospaces.fasta --output "$vsearch_udb" --threads $cores; then
+                # Don't leave a partial UDB behind, or every later run would try to use it.
+                rm -f "$vsearch_udb"
+            fi
             rm sintax_nospaces.fasta
         fi
 
         min_overlap_bp=$(printf "%.0f" "$(echo "$ampsize * $minoverlap" | bc -l)")
 
-        vsearch --usearch_global "$runid".corrected.fasta \
+        if [[ ! -f "$vsearch_udb" ]] || ! vsearch --usearch_global "$runid".corrected.fasta \
             --db "$vsearch_udb" \
             --blast6out bin_raw.txt \
             --id "$bin_thresh" \
             --maxhits "$bin_maxhits" \
             --maxaccepts "$bin_maxaccepts" \
-            --threads $cores
+            --threads $cores; then
+            echo "ERROR: BIN matching failed for $name (vsearch could not build or search $vsearch_udb)."
+            echo "  The run will continue with BIN set to NA for this primer pair."
+            bin_failures+=("$name: vsearch could not build or search $vsearch_udb")
+            # An empty hit list gives every OTU BIN = NA below, keeping the output format.
+            : > bin_raw.txt
+        fi
 
         awk -F'\t' -v mo="$min_overlap_bp" '
         BEGIN { OFS="\t" }
@@ -1207,20 +1497,23 @@ process_primer_dir() {
         rm bin_raw.txt
 
         python3 - "${runid}__${name}__OTUDetails.tsv" bin_results.tsv <<'PYEOF'
-import csv, sys
+import csv, re, sys
 otu_file, bin_file = sys.argv[1], sys.argv[2]
+# bip3 rewrites "reads-N" in an OTU's name after negative-control subtraction, so match
+# on the name without it.
+key = lambda name: re.sub(r'\|reads-\d+', '', name)
 bin_map = {}
 with open(bin_file) as f:
     for line in f:
         p = line.rstrip('\n').split('\t')
         if len(p) >= 4:
-            bin_map[p[0]] = (p[1], p[2], p[3])
+            bin_map[key(p[0])] = (p[1], p[2], p[3])
 rows = []
 with open(otu_file) as f:
     reader = csv.DictReader(f, delimiter='\t')
     fieldnames = reader.fieldnames + ["BIN", "Pct_Match", "Overlap_bp"]
     for row in reader:
-        hit = bin_map.get(row["Sequence_Name"])
+        hit = bin_map.get(key(row["Sequence_Name"]))
         if hit:
             row["BIN"], row["Pct_Match"], row["Overlap_bp"] = hit
         else:
@@ -1248,7 +1541,7 @@ PYEOF
     echo -e "${runid}\tReadsInTargetBarcodes\t${name}\t${targetreadcount}" >> "$counts_file"
 
     # clean up primer directory
-    if [[ "$marker" == "COI-5P" ]] && (( ampsize >= 640 && ampsize <= 670 )); then
+    if [[ "$marker" == "COI-5P" ]] && (( ampsize >= coi_min_expected && ampsize <= coi_max_expected )); then
 
         mkdir -m 777 Error_Correction_Files
         mv vsearch_hit.tsv Error_Correction_Ref_Seqs.tsv
@@ -1285,26 +1578,37 @@ shopt -s nullglob
 
 cd "$wkdir" || { echo "\n\nERROR: Cannot access working directory $wkdir"; read -p "Press Enter to exit..."; exit 1; }
 
-fastq_files=(*.fastq.gz *.fastq)
+# Inputs come from --fastq / --params when given, otherwise from the working directory.
+# Paths are absolute from here on. The read files are sorted by name, so for paired-end
+# data R1 comes before R2 whatever mix of .fastq and .fastq.gz they are.
+fastq_dir="${fastq_dir:-$PWD}"
+fastq_files=()
+while IFS= read -r f; do
+    [[ -n "$f" ]] && fastq_files+=("$f")
+done < <(printf '%s\n' "$fastq_dir"/*.fastq.gz "$fastq_dir"/*.fastq | LC_ALL=C sort)
 # Collected into its own array: `param_file` must end up a plain scalar, because
 # bash cannot export array variables and the python steps below read it from the
 # environment.
-param_files=(*.xlsx)
+if [[ -f "$param_path" ]]; then
+    param_files=("$param_path")
+else
+    param_files=("${param_path:-$PWD}"/*.xlsx)
+fi
 
 if [[ ${#fastq_files[@]} -eq 0 ]]; then
-    echo -e "\n\nERROR: Missing .fastq or .fastq.gz files!"
+    echo -e "\n\nERROR: Missing .fastq or .fastq.gz files in $fastq_dir"
     read -p "Press Enter to exit..."
     exit 1
 fi
 
 if [[ ${#param_files[@]} -eq 0 ]]; then
-    echo "ERROR: No .xlsx parameter file found."
+    echo "ERROR: No .xlsx parameter file found in ${param_path:-$PWD}"
     read -p "Press Enter to exit..."
     exit 1
 fi
 
 if [[ ${#param_files[@]} -gt 1 ]]; then
-    echo "ERROR: Multiple .xlsx files found. Use only one."
+    echo "ERROR: Multiple .xlsx files found in ${param_path:-$PWD}. Use only one, or point --params at the file."
     read -p "Press Enter to exit..."
     exit 1
 fi
@@ -1333,6 +1637,18 @@ samp_name  = os.environ["COLNAME_SAMPLE"]
 df = pd.read_excel(param_file, sheet_name=sheet)
 df = df.loc[:, ~df.columns.astype(str).str.startswith("Unnamed")]
 df.columns = [str(c).strip() for c in df.columns]
+# Stray spaces typed in Excel (e.g. "Diptera " or " ACGT") would otherwise break exact
+# matching downstream, so trim leading/trailing whitespace from every text cell.
+df = df.apply(lambda col: col.map(lambda v: v.strip() if isinstance(v, str) else v))
+
+# The control column is found by how its header starts, so templates can add a hint such as
+# "Negative Control (yes/YES/y/1)". It is renamed to the standard name, which is what
+# parameters.tsv carries and what bip3 and bip4 look up.
+neg_matches = [c for c in df.columns if c.lower().startswith(neg_name.lower())]
+if len(neg_matches) > 1:
+    sys.exit(f"ERROR: more than one column in sheet '{sheet}' starts with '{neg_name}': {neg_matches}. Keep only one.")
+if neg_matches and neg_matches[0] != neg_name:
+    df = df.rename(columns={neg_matches[0]: neg_name})
 
 for required in (samp_name, neg_name):
     if required not in df.columns:
@@ -1369,13 +1685,24 @@ if clashes:
 df.loc[present, samp_name] = cleaned
 sys.stdout.flush()
 
-valid_yes = {'yes', 'Yes', 'YES', '1'}
-valid_no  = {'no', 'No', 'NO', '0', '', 'nan', 'NaN', 'None'}
-neg_col   = df[neg_name].fillna('').astype(str).str.strip()
-neg_col   = neg_col.str.replace(r'^1\.0+$', '1', regex=True).str.replace(r'^0\.0+$', '0', regex=True)
-invalid   = neg_col[~neg_col.isin(valid_yes | valid_no)]
-if not invalid.empty:
-    sys.exit(f"ERROR: Invalid value(s) in '{neg_name}' column: {invalid.unique().tolist()}. Please use 'yes' or 'no'.")
+# A well is a negative control only if this column says yes, y or 1 (any case; Excel's
+# 1.0 counts as 1). Anything else, blank included, means it is not a control. The column is
+# rewritten as "yes" or blank so every later step (bip3, bip4) reads one consistent value.
+neg_col = df[neg_name].fillna('').astype(str).str.strip().str.lower()
+neg_col = neg_col.str.replace(r'^1\.0+$', '1', regex=True)
+valid_yes = {'yes', 'y', '1'}
+df[neg_name] = neg_col.where(neg_col.isin(valid_yes), '').map(lambda v: 'yes' if v else '')
+
+# Negative controls should carry no taxonomy. Users sometimes fill a column down the whole
+# sheet and leave identifications in control rows, so clear them here.
+tax_cols = [c for c in ("Kingdom", "Phylum", "Class", "Order", "Family", "Subfamily", "Genus", "Species")
+            if c in df.columns]
+is_ctrl  = neg_col.isin(valid_yes)
+had_tax  = is_ctrl & df[tax_cols].apply(lambda col: col.notna() & (col.astype(str).str.strip() != "")).any(axis=1)
+if had_tax.any():
+    df.loc[is_ctrl, tax_cols] = pd.NA
+    print(f"NOTE: cleared taxonomy from {int(had_tax.sum())} negative-control row(s) "
+          f"(columns: {', '.join(tax_cols)}).")
 
 df.to_csv(tsvfile, sep="\t", index=False)
 EOF
@@ -1431,6 +1758,9 @@ if sheet in xl.sheet_names:
                  f"Columns present: {list(df_new.columns)}")
 
     df_new = df_new[dict_cols]
+    # Trim stray spaces from every text cell, e.g. a Reference Library name typed with a
+    # trailing space would otherwise fail the library lookup.
+    df_new = df_new.apply(lambda col: col.map(lambda v: v.strip() if isinstance(v, str) else v))
     df_new = df_new.dropna(subset=[fwd_name, rev_name])
     df_new = df_new[df_new[fwd_name].astype(str).str.strip() != '']
 else:
@@ -1440,6 +1770,8 @@ else:
 
 if os.path.exists(dictfile):
     df_dict = pd.read_csv(dictfile, sep='\t')
+    # A dictionary saved by an earlier run may still hold untrimmed values.
+    df_dict = df_dict.apply(lambda col: col.map(lambda v: v.strip() if isinstance(v, str) else v))
 else:
     df_dict = pd.DataFrame(columns=dict_cols)
 
@@ -1725,30 +2057,40 @@ log_step "Curating input data" "$TL" "$T2L" $(( T2 - T ))
 
 T=$(date +%s); TL=$(date "+%Y-%m-%d %H:%M:%S")
 
-# Compress any plain .fastq files so the rest of the pipeline can use them uniformly
-for f in *.fastq; do
-    [[ -f "$f" ]] && gzip "$f"
-done
+# Input reads may be plain .fastq or .fastq.gz. Plain .fastq inputs sitting in the working
+# directory are gzipped in place, as BIP has always done, because the primer split below
+# turns every *.fastq here into a primer-pair directory. Reads in a separate --fastq
+# directory are read where they are and never modified; working copies go in the working
+# directory.
+if [[ "$(cd "$fastq_dir" && pwd -P)" == "$(pwd -P)" ]]; then
+    for i in "${!fastq_files[@]}"; do
+        f="${fastq_files[$i]}"
+        if [[ "$f" == *.fastq ]]; then
+            gzip "$f"
+            fastq_files[$i]="$f.gz"
+        fi
+    done
+fi
 
 if [[ "$do_pear" -eq 1 ]]; then
 
     echo "Paired-end mode: merging reads"
 
-    gz_files=(*.fastq.gz)
-
-    if [[ ${#gz_files[@]} -ne 2 ]]; then
-        echo "ERROR: Expected exactly 2 FASTQ.GZ files in $wkdir"
+    if [[ ${#fastq_files[@]} -ne 2 ]]; then
+        echo "ERROR: Paired-end mode expects exactly 2 FASTQ files (R1 and R2) in $fastq_dir, found ${#fastq_files[@]}"
         exit 1
     fi
 
-    read1="${gz_files[0]}"
-    read2="${gz_files[1]}"
+    read1="${fastq_files[0]}"
+    read2="${fastq_files[1]}"
 
-    # Decompress to working copies without touching the original .fastq.gz files
-    read1_decomp="${read1%.gz}.decomp.fastq"
-    read2_decomp="${read2%.gz}.decomp.fastq"
-    gunzip -c "$read1" > "$read1_decomp"
-    gunzip -c "$read2" > "$read2_decomp"
+    # Uncompressed working copies for PEAR, in the working directory (not beside the inputs)
+    read1_decomp="$(basename "${read1%.gz}").decomp.fastq"
+    read2_decomp="$(basename "${read2%.gz}").decomp.fastq"
+    for pair in "$read1:$read1_decomp" "$read2:$read2_decomp"; do
+        src="${pair%%:*}"; dst="${pair#*:}"
+        if [[ "$src" == *.gz ]]; then gunzip -c "$src" > "$dst"; else cp "$src" "$dst"; fi
+    done
 
     pear -j "$cores" -f "$read1_decomp" -r "$read2_decomp" -o "$runid" > pear.log
 
@@ -1757,6 +2099,13 @@ if [[ "$do_pear" -eq 1 ]]; then
     rm -f "$read1_decomp" "$read2_decomp"
 
     mv "$merged_fastq" all.fastq
+
+    # PEAR also writes the reads it discarded or could not merge. Delete them now: the
+    # primer split below turns every *.fastq here into a primer-pair directory, so left
+    # in place they would be processed as primer pairs. They are uncompressed and can run
+    # to gigabytes on a deep run; the counts that matter for QC (how many reads were
+    # discarded or left unmerged) are kept in pear.log, which goes to the results.
+    rm -f "${runid}.discarded.fastq" "${runid}.unassembled.forward.fastq" "${runid}.unassembled.reverse.fastq"
 
     # Count raw reads
     log_count "Raw" "ALL" "all.fastq"
@@ -1768,15 +2117,7 @@ else
 
     echo "Single-end mode: concatenating all FASTQ.GZ"
 
-    shopt -s nullglob
-    gz_files=(*.fastq.gz)
-
-    if [[ ${#gz_files[@]} -eq 0 ]]; then
-        echo "ERROR: No FASTQ.GZ files found in $wkdir"
-        exit 1
-    fi
-
-    python3 - "all.fastq" "${gz_files[@]}" <<'PYEOF'
+    python3 - "all.fastq" "${fastq_files[@]}" <<'PYEOF'
 import gzip, shutil, sys
 
 outfile = sys.argv[1]
@@ -1784,8 +2125,9 @@ infiles = sys.argv[2:]
 
 with open(outfile, "wb") as out:
     for f in infiles:
-        with gzip.open(f, "rb") as gz:
-            shutil.copyfileobj(gz, out)
+        opener = gzip.open if f.endswith(".gz") else open
+        with opener(f, "rb") as src:
+            shutil.copyfileobj(src, out)
 PYEOF
 
     # Count raw reads
@@ -1962,12 +2304,12 @@ log_step "Report generation" "$TL" "$T2L" $(( T2 - T ))
 # ---------------------------
 
 python3 - "$wkdir/parameters.tsv" "$wkdir/publication_metrics.txt" \
-          "$runid" "$platform" "$minreads" \
+          "$runid" "$platform" "$minreads" "$min_rank_match" "$BIP_VERSION" "$parallel_sintax" \
 <<'PYEOF'
 import sys, csv
 from datetime import date
 
-params_file, out_file, runid, platform, minreads = sys.argv[1:6]
+params_file, out_file, runid, platform, minreads, min_rank_match, bip_version, parallel_sintax = sys.argv[1:9]
 
 dict_cols = [
     'Forward Primer Name', 'Reverse Primer Name',
@@ -1991,12 +2333,15 @@ with open(params_file, newline='') as f:
 with open(out_file, 'w') as f:
     f.write('BIP Run Parameters\n')
     f.write('==================\n')
+    f.write(f'BIP version:        {bip_version}\n')
     f.write(f'Run ID:             {runid}\n')
     f.write(f'Date:               {date.today()}\n\n')
     f.write('Command line arguments\n')
     f.write('----------------------\n')
     f.write(f'Platform:           {platform}\n')
-    f.write(f'Min reads:          {minreads}\n\n')
+    f.write(f'Min reads:          {minreads}\n')
+    f.write(f'Min rank match:     {min_rank_match}\n')
+    f.write(f'Parallel SINTAX:    {parallel_sintax}\n\n')
     f.write('Primer pair parameters\n')
     f.write('----------------------\n')
     f.write('\t'.join(dict_cols) + '\n')
@@ -2047,9 +2392,34 @@ log_step "Total" "$START_LABEL" "$END_LABEL" $(( END_TIME - START_TIME ))
 
 mkdir -m 777 "$runid"_results
 
-sweep_excludes=(! -name . ! -name "${runid}_results" ! -name "$param_file" ! -name "$(basename "$dictfile")" ! -name "compose.yaml")
+sweep_excludes=(! -name . ! -name "${runid}_results" ! -name "$(basename "$param_file")" ! -name "$(basename "$dictfile")" ! -name "compose.yaml")
 for f in "${fastq_files[@]}"; do
-    sweep_excludes+=(! -name "$f")
+    sweep_excludes+=(! -name "$(basename "$f")")
+done
+# --fastq / --params may point into a subfolder of the working directory (e.g. /data/reads
+# when Docker mounts the user's folder at /data). Keep that top-level folder out of the
+# sweep, or the user's input files would be moved into the results folder.
+for p in "$fastq_dir" "$(dirname "$param_file")"; do
+    if [[ "$p" == "$PWD"/* ]]; then
+        rel="${p#"$PWD"/}"
+        sweep_excludes+=(! -name "${rel%%/*}")
+    fi
 done
 
 find . -maxdepth 1 "${sweep_excludes[@]}" -exec mv {} ./"${runid}_results"/ \;
+
+if [[ ${#umi_warnings[@]} -gt 0 ]]; then
+    echo ""
+    echo "WARNING: fewer than 1% of reads matched a UMI pair for:"
+    for f in "${umi_warnings[@]}"; do echo "  $f"; done
+    echo "  Check the UMIs in the parameters file, especially the orientation of the Reverse UMIs."
+fi
+
+if [[ ${#bin_failures[@]} -gt 0 ]]; then
+    echo ""
+    echo "ERROR: the run finished, but BIN matching failed, so the BIN column is NA for:"
+    for f in "${bin_failures[@]}"; do echo "  $f"; done
+    echo "  Check the reference library: its headers must be 'ID|BIN;tax=...', and if a .udb"
+    echo "  file sits next to it, it must be a valid vsearch UDB (delete it to have BIP rebuild it)."
+    exit 1
+fi

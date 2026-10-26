@@ -2,10 +2,27 @@
 # -*- coding: utf-8 -*-
 """
 Created on Fri Nov 14 16:02:45 2025
+Automated correction script which screens for indel errors in homopolymer tracts.
+Each sequence in a fasta file is searched using vsearch against a known, validated reference set of sequences,
+trimmed to the exact barcode region, to find its nearest neighbour. The sequence and its neighbour are aligned,
+and end-corrected (query sequence is either trimmed or padded with Ns to the exact length of neighbour sequence).
+The sequence is then searched for any internal gaps. If present, the following logic is applied:  
+-Only one or two consecutive gaps or insertions are corrected; 
+-Only corrected if they are part of, or adjacent to, a run of the same nucleotide (by default, a minimum of 4); 
+-If gaps are in the query sequence, they are replaced with a lowercase ‘n’; 
+-If gaps are in the reference sequence, a corresponding number of letters from the homopolymer are deleted from
+ the query sequence.
+
+v1.01 2026-04-28
 Includes "second-tier check": for sequences that still contain indels after homopolymer-based
 corrections, we attempt to correct indels just based on alignment to the reference sequence. 
 @author: robinfloyd
+v1.1 2026-10-23
+In the pairwise alignment step, new logic examines all equally high-scoring alignments and preferentially
+selects one which maximises gaps placed in or adjacent to homopolymer regions in the query sequence.
+Also, maximum accepted length for a COI barcode sequence has been increased from 670 to 673.
 """
+
 import sys
 import csv
 import os
@@ -13,6 +30,7 @@ import subprocess
 from contextlib import chdir
 from Bio import Align, SeqIO
 from Bio.Seq import Seq
+from itertools import islice
 
 def match_by_vsearch(qry_file,reference_set):
     hit_seqs_dict = {}
@@ -103,6 +121,7 @@ def homopolymer_length(seq, index):
     return the length of the homopolymer run around that index.
     The index refers to the position in the *aligned* reference.
     """
+
     if index < 0 or index >= len(seq):
         return '','','','',''
 
@@ -113,7 +132,10 @@ def homopolymer_length(seq, index):
     if left_index >= 0:
         while left_index >= 0 and seq[left_index] == "-":
             left_index -= 1
-        base_left = seq[left_index]
+        try:
+            base_left = seq[left_index]
+        except IndexError:
+            base_left = ''
     else:
         base_left = ''
     
@@ -124,7 +146,10 @@ def homopolymer_length(seq, index):
         while right_index < len(seq) and seq[right_index] == "-":
             last_gap_position = right_index
             right_index += 1
-        base_right = seq[right_index]
+        try:
+            base_right = seq[right_index]
+        except IndexError:
+            base_right = ''
     else:
         base_right = ''
 
@@ -232,8 +257,50 @@ def homopolymer_length(seq, index):
                 placement = 'adjacent-R'
                 left_start_index = last_gap_position + 1  
                 # right index unchanged            
-            
+    
     return base, placement, homopolymer, left_start_index, right_end_index
+
+def homopolymer_preference(alignment):
+    """
+    Score an alignment according to whether its gaps (or positions opposite gaps) are part of or adjacent to 
+    homopolymer runs. Higher scores are preferred.
+    """
+    coords = alignment.coordinates
+    score = 0
+    gap_runs = []
+    alignment_pos = 0
+    alignment_length = alignment.shape[1]
+    
+    for i in range(coords.shape[1] - 1):
+        
+        ref_start, ref_end = coords[0, i:i+2]
+        qry_start, qry_end = coords[1, i:i+2]
+        
+        ref_len = ref_end - ref_start
+        qry_len = qry_end - qry_start
+        
+        if ref_len == 0 or qry_len == 0:
+            gap_len = max(ref_len, qry_len)
+            gap_start = alignment_pos
+            gap_end = alignment_pos + gap_len
+
+            # Keep only internal gaps; terminal gaps are ignored.
+            if gap_start > 0 and gap_end < alignment_length:
+                gap_runs.append((gap_start, gap_end))
+
+            alignment_pos += gap_len
+        else:
+            alignment_pos += ref_len
+    
+    # Call the homopolymer_length function to find the longest string of identical letters around the gap position
+    for gap_run in gap_runs:
+        homopolymer = homopolymer_length(alignment[1],gap_run[0])[2]
+
+        # For each gap run that connects to a homopolymer of 4 or more, add 1 to the score for this alignment
+        if len(homopolymer) >= 4:
+            score += 1
+
+    return score
 
 def second_tier_check(seq_name, qry_aln_edited, indels_not_corrected_list):
     for run in indels_not_corrected_list:
@@ -299,8 +366,24 @@ aligner.extend_end_deletion_score = 0
 aligner.open_end_insertion_score = -10
 aligner.extend_end_insertion_score = -2
 
+# Input files are taken as two arguments when calling the script at the command line;
+# First argument: the set of sequences to be corrected.
+# Second argument: the reference set to be used for correction.
 qry_file = sys.argv[1]
 reference_set = sys.argv[2]
+# In-frame COI-5P lengths, comma-separated: coi_expected_lengths in the advanced parameters
+# of BIP.sh, which bip3 also uses. A corrected sequence outside this list's range is a NUMT
+# and is excluded below, so the accepted window is set in one place for the whole pipeline.
+if len(sys.argv) < 4 or not sys.argv[3].strip():
+    sys.exit('coi_expected_lengths (arg 3) is required: comma-separated integers, e.g. 640,643,646')
+try:
+    expected_lengths = [int(x) for x in sys.argv[3].split(',') if x.strip()]
+except ValueError:
+    sys.exit(f"coi_expected_lengths must be a comma-separated list of integers (got '{sys.argv[3]}')")
+if not expected_lengths:
+    sys.exit(f"coi_expected_lengths must be a comma-separated list of integers (got '{sys.argv[3]}')")
+min_expected_length = min(expected_lengths)
+max_expected_length = max(expected_lengths)
 
 qry_seq_list = list(SeqIO.parse(qry_file, 'fasta'))
 output_dict = {}
@@ -341,6 +424,8 @@ for qry_record in qry_seq_list:
     non_hp_edit = False
     startgapcounter = 0
     endgapcounter = 0
+    best_score = 0
+    best_alignments = []
 
     if not seq_name in vsearch_dict.keys():
         # if the sequence found no match, exclude
@@ -359,8 +444,31 @@ for qry_record in qry_seq_list:
     edited_name = seq_name
     
     # Carry out pairwise alignment of query sequence with its top hit
-    alignments = aligner.align(ref_seq, qry_seq) 
-    ref_aln, qry_aln = alignments[0]
+    alignments = aligner.align(ref_seq, qry_seq)
+
+    if len(alignments) == 1:
+        # If only one alignment exists, no check is needed, it will be used.
+        best_alignments = alignments
+
+    # if there is more than one alignment, select alignments where gaps are part of or adjacent to homopolymers
+    else:
+        if len(alignments) > 100:
+        # Sequences that are highly divergent from their nearest neighbour may have a very large number of equally high-scoring
+        # alignments, which causes significant slowdown. If the number of alignments is over 100, we will only look at the first 100. 
+            alignments = islice(alignments, 100)
+        
+        # Otherwise, the list of alignments is used as-is.    
+        
+        for alignment in alignments:
+            score = homopolymer_preference(alignment)
+    
+            if score > best_score:
+                best_score = score
+                best_alignments = [alignment]
+            elif score == best_score:
+                best_alignments.append(alignment)
+                                
+    ref_aln, qry_aln = best_alignments[0]
     
     if not ('-' in ref_aln) and not ('-' in qry_aln):
         # exact match, nothing to correct.
@@ -601,6 +709,9 @@ for qry_record in qry_seq_list:
                 edited_name = edited_name + '|indel'
     
             else:
+                # The edits we made corrected stops/indels.
+                # The original, un-edited sequence will still go to the standard output file, with "check" added to the header.
+                # The edited version goes to a separate fasta file ("uncertain_edits.fasta"). Optionally, users can decide whether they want to accept these.
                  
                 non_hp_autocorrect_count += 1
                 non_hp_edit = True
@@ -621,7 +732,7 @@ for qry_record in qry_seq_list:
     # After doing all possible edits, now check the final sequence for length.
 
     final_seq_length = len(qry_aln_edited_nogaps)
-    if not(640 <= final_seq_length <= 670):
+    if not(min_expected_length <= final_seq_length <= max_expected_length):
        # NUMT; exclude based on length.
        print('Sequence', seq_name,'excluded due to length of', final_seq_length,'bp.')
        problem_dict[edited_name] = qry_aln_edited_nogaps

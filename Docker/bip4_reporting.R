@@ -34,11 +34,13 @@ params$primer_pair <- paste(params[["Forward Primer Name"]],
 sample_plate_map <- params %>%
   distinct(Sample, primer_pair, Plate)
 
-# Control wells: any row with a non-empty "Negative Control" value
-ctrl_samples <- params$Sample[
-  !is.na(params[["Negative Control"]]) &
-  nchar(trimws(as.character(params[["Negative Control"]]))) > 0
-]
+# Control wells: Negative Control is yes, y or 1 (any case) - the same rule BIP.sh and
+# bip3 use. Anything else, including "no" or "0", is a sample.
+is_control_value <- function(x) {
+  v <- tolower(trimws(as.character(x)))
+  !is.na(x) & (v %in% c("yes", "y") | grepl("^1(\\.0+)?$", v))
+}
+ctrl_samples <- params$Sample[is_control_value(params[["Negative Control"]])]
 
 # --- Read counts file ---
 readcounts <- read.table(file.path(wkdir, paste0(runid, "_readcounts.tsv")),
@@ -236,7 +238,10 @@ plot_success <- ggplot(plate_success,
                        aes(x = Pct,
                            y = factor(Plate, levels = plate_levels),
                            fill = Colour)) +
-  geom_bar(stat = "identity") +
+  geom_bar(stat = "identity", width = 0.75) +
+  # Targets / specimens and the rate, written inside the left end of each bar
+  geom_text(aes(x = 2, label = sprintf("%d/%d (%.0f%%)", Targets, Total, Pct)),
+            hjust = 0, size = plate_text_size / .pt, fontface = "bold") +
   # scales = "free": free_y drops each panel to only the plates belonging to that
   # primer set (so a 28S-only plate does not occupy an empty row in the COI facet);
   # x stays 0-100% via the fixed limits below.
@@ -259,6 +264,12 @@ plot_success <- ggplot(plate_success,
     strip.text          = element_text(face = "bold", size = 8)
   ) +
   labs(x = "Barcode Success Rate")
+
+# Height of the success plot on its page: about 0.35 in per plate row plus room for the
+# strip and axis, capped at the full page. A fixed full-page height stretched a run with
+# one plate per primer pair into a single bar the height of the page.
+success_rows     <- max(table(plate_success$primer_pair))
+success_height_h <- min(0.91, (1.2 + 0.35 * success_rows) / 11)
 
 # ============================================================
 # 5. PLATE HEATMAPS
@@ -295,9 +306,19 @@ df_nonctrl <- otu_all %>%
   mutate(Sample = sub("__.*$", "", Sample)) %>%
   filter(!Sample %in% ctrl_samples)
 
-df_ctrl <- otu_all %>%
-  mutate(Sample = sub("__.*$", "", Sample)) %>%
-  filter(Sample %in% ctrl_samples)
+# Control-well OTUs are no longer in the OTU tables: bip3 subtracts them from same-plate
+# OTUs and lists them in a ControlContaminants file per primer pair, read here.
+contam_files <- unlist(Filter(Negate(is.null), lapply(all_dirs, function(d) {
+  f <- list.files(d, pattern = "_ControlContaminants\\.tsv$", full.names = TRUE)
+  if (length(f) > 0) f else NULL
+})))
+df_ctrl <- bind_rows(lapply(contam_files, function(f) {
+  x <- read.table(f, header = TRUE, sep = "\t", stringsAsFactors = FALSE,
+                  comment.char = "", quote = "")
+  if (nrow(x) == 0) return(NULL)
+  data.frame(Sample = x$Control_Sample, Read_Count = x$Read_Count, stringsAsFactors = FALSE)
+}))
+if (ncol(df_ctrl) == 0) df_ctrl <- data.frame(Sample = character(0), Read_Count = numeric(0))
 
 total_reads        <- sum(df_nonctrl$Read_Count)
 total_samples_seq  <- length(unique(sub("\\.NTS[0-9]+$", "", df_nonctrl$Sample[df_nonctrl$Read_Count > 0])))
@@ -581,8 +602,11 @@ print_heatmap_pages <- function(reads_df_all, plate_layout, well_rows, well_cols
               strip.text  = element_text(face = "bold", size = 7),
               panel.grid  = element_blank(),
               panel.spacing = unit(0.3, "cm"),
+              # Pinned to the top of the plates: centred on them, the legend is taller
+              # than a single row of plates and rose into the page title.
               legend.position = "right",
-              legend.key.height = unit(1.5, "cm"))
+              legend.justification = "top",
+              legend.key.height = unit(0.8, "cm"))
       
       # Convert to gtable and FORCE panel cells to fixed physical size
       g <- ggplotGrob(p)
@@ -643,7 +667,8 @@ print_hist_page(plot3, "OTUs per Sample", n_pp)
 print(ggdraw() +
         draw_plot_label("Success by Plate", size = 14,
                         x = 0.5, y = 0.97, hjust = 0.5) +
-        draw_plot(plot_success, x = 0.05, y = 0.03, width = 0.90, height = 0.91))
+        draw_plot(plot_success, x = 0.05, y = 0.94 - success_height_h,
+                  width = 0.90, height = success_height_h))
 
 # --- Heatmaps ---
 print_heatmap_pages(reads_per_sample_all, plate_layout, well_rows, well_cols, "Reads per Well")
