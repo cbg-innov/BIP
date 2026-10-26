@@ -8,11 +8,12 @@ BIP is a containerized DNA barcoding pipeline for use with any genetic marker, p
 - [What BIP does](#what-bip-does)
 - [How BIP works](#how-bip-works)
 - [Requirements](#requirements)
-- [Quick start](#quick-start)
+- [Quick start](#to-install-bip-quick-start)
 - [Run on your own data](#run-on-your-own-data)
 - [Parameters](#parameters)
 - [Reference library](#reference-library)
 - [Outputs](#outputs)
+- [Use in Galaxy](#use-in-galaxy)
 - [Build the image yourself](#build-the-image-yourself)
 - [Interactive container](#interactive-container)
 - [Troubleshooting](#troubleshooting)
@@ -30,16 +31,16 @@ BIP must be provided with a non-demultiplexed `.fastq.gz` file (or `R1.fastq.gz`
 
 Stages, in order (these are the exact stage names written to `duration_log.txt`):
 
-1. **Curating input data** — validate that at least one `.fastq.gz`/`.fastq` and exactly one `.xlsx` are present in the working directory.
+1. **Curating input data** — validate that at least one `.fastq.gz`/`.fastq` and exactly one `.xlsx` are present in the working directory (or in the locations given with `--fastq` / `--params`).
 2. **FASTQ file merge** — for Illumina paired-end, merge R1/R2 with `PEAR`; otherwise concatenate all `.fastq.gz`/`.fastq` into a single file.
 3. **Primer recognition & read orientation** — orient and split reads by primer pair (`cutadapt`).
 4. **Size filtering** — length-filter by the `Min/Max amplicon length` set for each primer set.
 5. **Demultiplexing** — assign reads to wells by UMI (`cutadapt`), sanitize/rename sample headers.
-6. **OTU clustering** — per-well primary + secondary clustering (`vsearch`), consensus building via multiple-sequence alignment (`muscle`/`DECIPHER`/`msa` in R).
+6. **OTU clustering** — per-well primary + secondary clustering (`vsearch`), consensus building via multiple-sequence alignment (`MAFFT`, consensus called with `DECIPHER` in R).
 7. **Indel correction** (COI-5P only, full-length amplicons) — reference-frame homopolymer/indel correction against a curated reference set.
 8. **Chimera removal** — `vsearch --uchime_denovo`.
 9. **Tax assignment** — `vsearch --sintax` against the user-specified (or bundled BOLDistilled) reference library.
-10. **Barcode inference** — classify OTUs as on-target barcodes vs. non-target sequences using a decision tree.
+10. **Barcode inference** — subtract negative-control contaminants from same-plate OTUs, then classify OTUs as on-target barcodes vs. non-target sequences using a decision tree.
 11. **BIN matching** — (COI-5P only) — match OTUs to BOLD BINs (`vsearch --usearch_global`).
 12. **Report generation** — an R script renders a PDF report (`<RunName>_Report.pdf`) and writes `publication_metrics.txt`.
 
@@ -85,6 +86,8 @@ BIP_DATA="$(pwd)" docker compose -f compose.yaml run --rm \
 
 Results land in `./DemoRun_results/` inside your working directory. 
 
+**Updating:** `compose.yaml` only pulls the image if you don't have it yet, so an existing installation keeps its old version until you pull again with the same `docker pull` command above. The first line of every run's `publication_metrics.txt` records the BIP version that produced it.
+
 ---
 
 ## Run on your own data
@@ -99,7 +102,7 @@ BIP_DATA="$(pwd)" docker compose -f compose.yaml run --rm \
   bip bash /BIP/SCRIPTS/BIP.sh --platform nanopore --minreads 2 <RunName> --chimera_mindiv 0.001
 ```
 
-No new flags needed for this. BIP just rescans the working directory for at least one `.fastq.gz` (or `.fastq`) and exactly one `.xlsx`. Your `.fastq.gz`, `.xlsx`, and a persistent `dictionary_BIP.tsv` are never moved or archived, so you can rerun without re-copying anything. If it finds no `.fastq.gz`/`.fastq` or more than one `.xlsx`, it exits with an error naming the problem (this is also why a stray Microsoft Excel lock file, `~$parameters.xlsx`, will break the run if the params file is open elsewhere).
+No new flags needed for this. BIP just rescans the working directory for at least one `.fastq.gz` (or `.fastq`) and exactly one `.xlsx`. To keep inputs elsewhere instead, point `--fastq` at a folder of reads and `--params` at the `.xlsx` (paths as seen inside the container, e.g. `--fastq /data/reads --params /data/params/parameters.xlsx`); reads in a separate `--fastq` folder are only read, never modified. Your `.fastq.gz`, `.xlsx`, and a persistent `dictionary_BIP.tsv` are never moved or archived, so you can rerun without re-copying anything. If it finds no `.fastq.gz`/`.fastq` or more than one `.xlsx`, it exits with an error naming the problem (this is also why a stray Microsoft Excel lock file, `~$parameters.xlsx`, will break the run if the params file is open elsewhere).
 
 - `--platform` is required: `illumina_pe`, `pacbio`, `nanopore`, or `other`.
 - `--minreads N` (default `5`) sets a floor for per-well OTU retention.
@@ -123,10 +126,12 @@ The parameters spreadsheet (`.xlsx`) has three tabs: `Instructions`, `UMIs and P
 | **Plate** | Plate name/number (e.g., `Plate01`) |
 | **Well** | Well ID (e.g., `A01`) |
 | **Sample** | Sample name for this well |
-| **Forward / Reverse UMI** | UMI sequence for this well |
+| **Forward / Reverse UMI** | UMI sequence for this well, 5'→3' as on the primer oligos. The Reverse UMI is written as on the reverse primer, i.e. reverse-complemented relative to how it appears at the end of a read in the forward-primer orientation |
 | **Forward / Reverse Primer Name** | Must match a name defined in the persistent `dictionary_BIP.tsv` file or specified in the `Dictionary Update` tab |
-| **Negative Control** | `yes`, `y`, `Y`, `1`, etc if this well is a negative control, otherwise leave blank |
-| **Kingdom … Species** | Optional expected taxonomy, used to greatly aid barcode inference |
+| **Negative Control** | `yes`, `y` or `1` (any case) marks a negative-control well; anything else, including blank, is a sample. The header only needs to start with `Negative Control`, e.g. `Negative Control (yes/y/1)`. Taxonomy in control rows is ignored |
+| **Kingdom … Species** | Optional expected taxonomy, used to greatly aid barcode inference. Use the same names as your reference library, since a name that differs from the library's at an enforced rank (Kingdom down to `--min_rank_match`, default Order) is scored as a mismatch and the OTU cannot be the target. Leave a rank blank if the names differ |
+
+**Negative controls change the outputs.** Before barcode inference, every OTU in a control well is treated as a contaminant: same-plate OTUs that match it (≥99% identity over the whole alignment) lose its read count, and any left below `--minreads` are removed. Control-well OTUs are then left out of `OTUDetails.tsv` and the FASTA files and listed in `ControlContaminants.tsv` instead (see [Outputs](#outputs)).
 
 ### Dictionary Update (one row per primer pair)
 
@@ -137,7 +142,7 @@ The parameters spreadsheet (`.xlsx`) has three tabs: `Instructions`, `UMIs and P
 | **Marker** | Locus name (e.g., `COI-5P` for the COI barcode region, anything else for all other markers) |
 | **Reference Library** | Prefix of a SINTAX-formatted `.fasta` in `REFS/` (e.g., `BOLDistilled_COI_Apr2026` is fine for referring to `BOLDistilled_COI_Apr2026_SEQUENCES_sintax.fasta`). Must be an unambiguous prefix. If another file in `REFS/` shares it, the run fails with a "multiple files match" error. |
 | **Min / Max amplicon length** | Length filter, applied with UMIs and primers still attached |
-| **Target amplicon length** | Expected clean amplicon length (no primers/UMIs) |
+| **Target amplicon length** | **Required.** Expected clean amplicon length (no primers/UMIs). Also used to break ties between candidate barcodes (closest to this length wins) and, for COI-5P, to decide whether full-length checks (reading frame, NUMTs) apply |
 | **Primary / Secondary OTU clustering threshold** | vsearch clustering identity thresholds (within-well, then across-run) |
 | **Tax assign probability threshold** | SINTAX confidence cutoff |
 | **BIN assign threshold** | Minimum identity to accept a BOLD BIN match (used for COI-5P only) |
@@ -152,6 +157,10 @@ A handful of parameters (UMI/primer overlap minimums, per-base error tolerances,
 | `--platform` | *(required)* | `illumina_pe`, `pacbio`, `nanopore`, or `other`. Determines whether R1/R2 are merged with `PEAR` and whether chimera screening runs early (per-sample) or late (post-clustering). |
 | `--minreads` | `5` | OTUs below this per-sample read count are discarded during clustering. |
 | `--wd` | `/BIP/Barcoding` | Working directory — where BIP looks for the input `.fastq.gz`/`.xlsx` and writes `<RunName>_results/`. |
+| `--fastq` | *(working directory)* | Folder holding the input `.fastq.gz`/`.fastq` files. Reads in a separate folder are never modified. |
+| `--params` | *(working directory)* | The parameters `.xlsx` file, or a folder holding exactly one. |
+| `--min_rank_match` | `o` | Rank down to which the expected taxonomy is enforced: `k`, `p`, `c`, `o`, `f`, `g` or `s` (or the rank name). A mismatch at this rank or above stops an OTU being the target; lower ranks only break ties. |
+| `--parallel_sintax` | `FALSE` | `FALSE` runs SINTAX on one thread with a fixed seed, so taxonomy and probabilities are reproducible. `TRUE` uses all cores and is faster (roughly 2× for the taxonomy step) but results can vary slightly between runs. Recorded in `publication_metrics.txt`. |
 | `--scripts` | `/BIP/SCRIPTS` | Directory containing `BIP.sh`'s companion `bip1`-`bip4` R/Python scripts. |
 | `--refs` | `/BIP/REFS` | Reference library directory - searched for both the SINTAX taxonomy reference and the error-correction reference (`reference_seqs_*.fasta`). |
 | `--ref_seq_corr` | *(auto-detect)* | Explicit path to the error-correction reference FASTA. Leave unset to auto-detect the single `reference_seqs_*.fasta` in `--refs`. |
@@ -166,6 +175,7 @@ A handful of parameters (UMI/primer overlap minimums, per-base error tolerances,
 | `--chimera_mindiv` | `0.0005` | `vsearch --uchime_denovo` `mindiv` parameter. |
 | `--bin_maxhits` | `1` | `vsearch --usearch_global` `maxhits` parameter (BIN matching). |
 | `--bin_maxaccepts` | `1` | `vsearch --usearch_global` `maxaccepts` parameter (BIN matching). |
+| `--coi_expected_lengths` | `640,643,…,670,673` | In-frame COI-5P barcode lengths. Other lengths are flagged as indels/NUMTs and cannot be the target; the list's range also sets which amplicons get full-length COI checks. |
 
 ---
 
@@ -193,13 +203,23 @@ Since `--refs` replaces the search location entirely rather than adding to it, `
 Written to `<wkdir>/<RunName>_results/`:
 
 - **`<RunName>_Report.pdf`** — summary report.
-- **`publication_metrics.txt`** — run parameters, software versions, and system info often required for publication.
+- **`publication_metrics.txt`** — BIP version, run parameters, software versions, and system info often required for publication.
 - **`duration_log.txt`** — per-stage timing.
-- **`<PrimerPair>/`** — per-primer-pair OTU details (`<RunName>__<PrimerPair>__OTUDetails.tsv`), consensus FASTA files, and error-correction intermediates.
+- **`<PrimerPair>/`** — per-primer-pair OTU details (`<RunName>__<PrimerPair>__OTUDetails.tsv`), consensus FASTA files, and error-correction intermediates. Also:
+  - **`…__ControlContaminants.tsv`** — every OTU found in a negative-control well, with the reads it removed from same-plate OTUs.
+  - **`…__ControlSubtraction.tsv`** — every OTU that lost reads to a contaminant: reads before and after, and whether it was removed.
+
+  Control-well OTUs do not appear in `OTUDetails.tsv` or the FASTA files, read counts there are after subtraction, and the last column, `Reads_Subtracted`, gives the reads removed from each OTU.
 - **`Miscelleneous_Files/`** — read-count summaries, the merged parameters TSV, and other intermediate files.
 - **`Individual_Raw_Fastq_Files.tar.gz`** — per-well demultiplexed reads, often required for SRA archiving for publication.
 
 Your original `.fastq.gz`/`.fastq`, `.xlsx`, `dictionary_BIP.tsv`, and `compose.yaml` (if present) stay at the top level of `wkdir`. They are never moved or archived into the results folder, so nothing is lost if you delete `<RunName>_results/` and rerun.
+
+---
+
+## Use in Galaxy
+
+BIP is published on the main Galaxy Tool Shed as [`bip` by `cbg-innov`](https://toolshed.g2.bx.psu.edu/view/cbg-innov/bip). A Galaxy server's administrator can install it from there; it then appears in that server's tool list and runs inside the same `ghcr.io/cbg-innov/bip` image, so the server needs Docker or Singularity for jobs. Each Tool Shed release is pinned to the matching image version.
 
 ---
 
@@ -242,6 +262,10 @@ To make your own data visible inside the interactive container without `docker c
 - **No output on the host?** Make sure `wkdir=/data` is set (via `-e wkdir=/data`) and that `BIP_DATA` points at a real folder. Otherwise BIP writes to its default in-container `/BIP/Barcoding`, which is lost when the container exits.
 - **"Multiple .xlsx files found"?** Check for a Microsoft Excel lock file (`~$<name>.xlsx`) in the same folder and ensure that the file is not open on your device. Close the file in Excel or delete the lock file.
 - **"Multiple files match" for the reference library?** Another file in `REFS/` shares the same prefix as your `Reference Library` value (e.g., a metadata PDF). Use a longer, more specific prefix.
+- **"WARNING: fewer than 1% of reads matched a UMI pair"?** The UMIs in the parameters file probably don't match the reads, most often because the Reverse UMIs are reverse-complemented (see [UMIs and Primers](#umis-and-primers-one-row-per-well)). The run continues, but most wells will have no OTUs.
+- **"ERROR: the OTU step did not complete for every sample"?** BIP stops rather than continue with samples missing. Re-run; if it recurs, leave more cores free (`--cores_to_leave`) or, on Docker Desktop for macOS, use a Docker volume rather than a bind-mounted folder for the working directory.
+- **"ERROR: the run finished, but BIN matching failed"?** All results are written, with BIN `NA` for the primer pairs listed, but BIP exits with status 1. Check the reference library's header format (`ID|BIN;tax=...`), and delete any broken `.udb` file next to it so BIP rebuilds it.
+- **Slower than before?** Taxonomy assignment runs on one thread by default so that results are reproducible. Use `--parallel_sintax TRUE` to trade that for speed.
 - **Disk space.** Large runs can generate many intermediate files; ensure adequate free disk on the Docker host.
 
 ---
