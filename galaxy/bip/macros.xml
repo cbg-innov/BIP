@@ -6,7 +6,7 @@
       (suffix N); the release job checks the tag matches these two tokens.
     -->
     <token name="@TOOL_VERSION@">1.0.1</token>
-    <token name="@VERSION_SUFFIX@">0</token>
+    <token name="@VERSION_SUFFIX@">1</token>
     <token name="@PROFILE@">24.0</token>
 
     <xml name="requirements">

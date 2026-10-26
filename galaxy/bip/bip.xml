@@ -9,8 +9,9 @@
       it globs the working directory for *.fastq.gz / *.fastq and exactly one *.xlsx,
       then writes everything into <RunName>_results/. This wrapper therefore (1) stages
       the selected Galaxy datasets into a private scratch dir under fixed, glob-safe
-      names, (2) pins the run name to "bip" so all output paths are deterministic, and
-      (3) translates $GALAXY_SLOTS into BIP's cores_to_leave flag (BIP uses
+      names, (2) passes the user's project name as the run name (so BIP prefixes its
+      files with it) and then renames <RunName>_results/ and the report to fixed
+      names so from_work_dir paths stay deterministic, and (3) translates $GALAXY_SLOTS into BIP's cores_to_leave flag (BIP uses
       nproc minus cores_to_leave threads, which would go negative on a low-core runner).
     -->
     <command detect_errors="exit_code"><![CDATA[
@@ -45,7 +46,7 @@ ln -s '$dictionary' "\$wd/dictionary_BIP.tsv" &&
     #end for
 #end if
 
-## ---- run BIP inside its bundled conda env; "bip" is the fixed run name ----
+## ---- run BIP inside its bundled conda env; the project name is the run name ----
 micromamba run -n bip bash /BIP/SCRIPTS/BIP.sh
     --platform '$platform_cond.platform'
     --minreads '$minreads'
@@ -65,11 +66,22 @@ micromamba run -n bip bash /BIP/SCRIPTS/BIP.sh
     --bin_maxaccepts '$advanced.bin_maxaccepts'
 #end if
     --wd "\$wd"
-    bip
-    < /dev/null
+    '$project_name'
+    < /dev/null &&
+
+## ---- normalise the results dir so the outputs' from_work_dir paths stay fixed ----
+mv "\$wd/${project_name}_results" "\$wd/results" &&
+mv "\$wd/results/${project_name}_Report.pdf" "\$wd/results/Report.pdf"
     ]]></command>
 
     <inputs>
+        <!-- BIP strips anything outside [[:alnum:]_.-] from the run name, so reject those
+             characters up front; a leading '-' would be parsed by BIP.sh as an option. -->
+        <param name="project_name" type="text" label="Project name"
+               help="Prefix for all outputs.  Spaces or '/' are not allowed. Must not start with '.' or '-'.">
+            <validator type="regex" message="Use only letters, digits, '_', '.' or '-' (no spaces or '/'), and don't start with '.' or '-'.">^[A-Za-z0-9_][A-Za-z0-9_.-]*$</validator>
+        </param>
+
         <param name="parameters" type="data" format="xlsx" label="Parameters spreadsheet (.xlsx)"
                help="The BIP parameters workbook with the 'UMIs and Primers' and 'Dictionary Update' tabs. Exactly one is required."/>
 
@@ -135,17 +147,18 @@ micromamba run -n bip bash /BIP/SCRIPTS/BIP.sh
     </inputs>
 
     <outputs>
-        <data name="report" format="pdf" label="${tool.name} on ${on_string}: Report (PDF)"
-              from_work_dir="bip_workdir/bip_results/bip_Report.pdf"/>
-        <data name="metrics" format="txt" label="${tool.name} on ${on_string}: publication metrics"
-              from_work_dir="bip_workdir/bip_results/publication_metrics.txt"/>
-        <data name="duration" format="txt" label="${tool.name} on ${on_string}: duration log"
-              from_work_dir="bip_workdir/bip_results/duration_log.txt"/>
-        <data name="raw_fastqs" format="binary" label="${tool.name} on ${on_string}: demultiplexed reads (tar.gz)"
-              from_work_dir="bip_workdir/bip_results/Individual_Raw_Fastq_Files.tar.gz"/>
-        <collection name="otu_details" type="list" label="${tool.name} on ${on_string}: OTU details per primer pair">
+        <data name="report" format="pdf" label="${project_name}_Report.pdf"
+              from_work_dir="bip_workdir/results/Report.pdf"/>
+        <data name="metrics" format="txt" label="${project_name}_publication_metrics.txt"
+              from_work_dir="bip_workdir/results/publication_metrics.txt"/>
+        <data name="duration" format="txt" label="${project_name}_duration_log.txt"
+              from_work_dir="bip_workdir/results/duration_log.txt"/>
+        <data name="raw_fastqs" format="binary" label="${project_name}_Individual_Raw_Fastq_Files.tar.gz"
+              from_work_dir="bip_workdir/results/Individual_Raw_Fastq_Files.tar.gz"/>
+        <!-- element identifiers come out as <project>__<primer pair> since BIP prefixes the run name -->
+        <collection name="otu_details" type="list" label="${project_name}_OTU_details">
             <discover_datasets pattern="(?P&lt;designation&gt;.+)__OTUDetails\.tsv"
-                               directory="bip_workdir/bip_results" recurse="true" format="tabular"/>
+                               directory="bip_workdir/results" recurse="true" format="tabular"/>
         </collection>
     </outputs>
 
@@ -157,6 +170,7 @@ micromamba run -n bip bash /BIP/SCRIPTS/BIP.sh
           count="N"/> for otu_details once the demo's primer-pair count is known.
         -->
         <test>
+            <param name="project_name" value="demo_run"/>
             <param name="parameters" value="parameters.xlsx"/>
             <conditional name="platform_cond">
                 <param name="platform" value="nanopore"/>
@@ -166,6 +180,7 @@ micromamba run -n bip bash /BIP/SCRIPTS/BIP.sh
             <output name="metrics">
                 <assert_contents>
                     <has_text text="BIP Run Parameters"/>
+                    <has_text text="demo_run"/>
                     <has_text text="Software versions"/>
                     <has_text text="Platform:"/>
                 </assert_contents>
@@ -195,6 +210,8 @@ produces per-well OTU tables with taxonomy, target/non-target status, quality me
 
 **Inputs**
 
+* *Project name* — required prefix for every output (letters, digits, ``_``, ``.``, ``-``;
+  no spaces or slashes).
 * *Parameters spreadsheet (.xlsx)* — the BIP workbook (``UMIs and Primers`` + ``Dictionary Update`` tabs).
 * *Reads* — non-demultiplexed FASTQ.gz. For Illumina paired-end, supply R1 and R2; for
   Nanopore/PacBio/other, supply one or more single-end FASTQ.gz files (concatenated).
@@ -202,7 +219,9 @@ produces per-well OTU tables with taxonomy, target/non-target status, quality me
 
 **Outputs**
 
-* *Report (PDF)* — ``<run>_Report.pdf`` summary.
+All outputs are named ``<project>_...``.
+
+* *Report (PDF)* — ``<project>_Report.pdf`` summary.
 * *Publication metrics* — parameters, software versions, and system info.
 * *Duration log* — per-stage timing.
 * *Demultiplexed reads (tar.gz)* — per-well reads, useful for SRA submission.
