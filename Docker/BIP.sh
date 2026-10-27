@@ -1913,7 +1913,13 @@ FNR==1 {
     print $0 extra
 }
 
-' $dictfile parameters.tsv > parameters_joined.tsv
+' $dictfile parameters.tsv > parameters_joined.tsv || {
+    # awk stops at the first primer pair missing from the dictionary; without this the
+    # run would carry on with parameters.tsv cut off at that row.
+    rm -f parameters_joined.tsv
+    echo "Add the primer pair to the 'Dictionary Update' tab of the parameters file."
+    exit 1
+}
 
 mv parameters_joined.tsv parameters.tsv
 
@@ -1947,6 +1953,40 @@ export COL_PLATE COL_WELL COL_SAMPLE COL_FWD_UMI COL_REV_UMI COL_FWD_PRIMER COL_
        COL_NEG_CTRL COL_FWD_PRIMER_SEQ COL_REV_PRIMER_SEQ COL_MARKER COL_REFLIB \
        COL_MINLEN COL_MAXLEN COL_AMPLEN COL_OTU_PRIMARY COL_OTU_SECONDARY \
        COL_TAX_PROB COL_BIN_THRESH
+
+# ---------------------------
+# Check that every primer pair's Reference Library matches exactly one file in the
+# reference directory now, rather than when each primer pair reaches taxonomy assignment.
+# Same matching as that later lookup: files starting with the name, .fasta/.fa/.fna.
+# ---------------------------
+
+reflib_problems=()
+while IFS=$'\t' read -r pair lib; do
+    if [[ -z "$lib" ]]; then
+        reflib_problems+=("$pair: no Reference Library given")
+        continue
+    fi
+    n=$(find "$reference_library_directory" -maxdepth 1 -type f \
+        \( -name "${lib}*.fasta" -o -name "${lib}*.fa" -o -name "${lib}*.fna" \) 2>/dev/null | grep -c .)
+    if (( n == 0 )); then
+        reflib_problems+=("$pair: no file starts with '$lib'")
+    elif (( n > 1 )); then
+        reflib_problems+=("$pair: $n files start with '$lib' (use a longer, unambiguous name)")
+    fi
+done < <(awk -F'\t' -v f="$COL_FWD_PRIMER" -v r="$COL_REV_PRIMER" -v l="$COL_REFLIB" \
+             'NR > 1 { print $f "_" $r "\t" $l }' parameters.tsv | sort -u)
+
+if (( ${#reflib_problems[@]} )); then
+    echo "ERROR: the Reference Library for these primer pairs does not match exactly one file in"
+    echo "  $reference_library_directory:"
+    printf '    %s\n' "${reflib_problems[@]}"
+    echo "  Reference libraries available there:"
+    find "$reference_library_directory" -maxdepth 1 -type f \
+        \( -name '*.fasta' -o -name '*.fa' -o -name '*.fna' \) 2>/dev/null | sort | sed 's/^/    /'
+    echo "  Fix the 'Reference Library' value in the Dictionary Update tab (or dictionary_BIP.tsv),"
+    echo "  or point --refs at the folder holding the library. Nothing has been processed yet."
+    exit 1
+fi
 
 # ---------------------------
 # Extract UMIs from parameters.tsv
