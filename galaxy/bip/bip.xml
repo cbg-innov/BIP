@@ -11,8 +11,10 @@
       the selected Galaxy datasets into a private scratch dir under fixed, glob-safe
       names, (2) passes the user's project name as the run name (so BIP prefixes its
       files with it) and then renames <RunName>_results/ and the report to fixed
-      names so from_work_dir paths stay deterministic, and (3) translates $GALAXY_SLOTS into BIP's cores_to_leave flag (BIP uses
-      nproc minus cores_to_leave threads, which would go negative on a low-core runner).
+      names so from_work_dir paths stay deterministic, (3) translates $GALAXY_SLOTS into BIP's cores_to_leave flag (BIP uses
+      nproc minus cores_to_leave threads, which would go negative on a low-core runner),
+      and (4) gives BIP a reference folder holding the user's BIN index (or a placeholder
+      index for "No BIN matching"), so BIP never builds its 6 GB index inside a job.
     -->
     <command detect_errors="exit_code"><![CDATA[
 ## ---- private working directory that BIP.sh will scan ----
@@ -46,6 +48,28 @@ ln -s '$dictionary' "\$wd/dictionary_BIP.tsv" &&
     #end for
 #end if
 
+## ---- reference folder for BIP (--refs), holding the BIN index it should search ----
+## BIP looks for <library>.udb next to the SINTAX library and only builds one (a 6 GB,
+## ~10 min job) when none is there. It finds the library with "find -type f", which
+## skips symlinks, so the image's library is copied; the index itself can be a link.
+mkdir -p bip_refs &&
+lib=\$(ls /BIP/REFS/BOLDistilled_COI_*_SEQUENCES_sintax.fasta | head -n 1) &&
+cp "\$lib" bip_refs/ &&
+udb="bip_refs/\$(basename "\${lib%.fasta}").udb" &&
+#if $bin_cond.bin_mode == 'index'
+    ## A zip that Galaxy did not unpack starts with "PK"; a vsearch UDB starts with "FBDU".
+    if [ "\$(head -c 4 '$bin_cond.bin_udb')" != "FBDU" ] ; then
+        echo "ERROR: the BIN index is not a vsearch UDB file. If it is BOLD's vsearch.zip, upload it again with auto-decompress on (the default), or upload the unzipped file." >&2 ;
+        exit 1 ;
+    fi &&
+    ln -s '$bin_cond.bin_udb' "\$udb" &&
+#else
+    ## No BIN matching: an index holding one placeholder sequence that matches nothing,
+    ## so BIP's search finishes at once and every BIN is NA, instead of BIP building one.
+    printf '>no_bin_matching|NA\nACGTTGCATGTCGCATGATGCATGAGAGTTGACGTACCTAGGCTAATCGGATCCATGCAATGCCTAGCTTAGGCATCGATCGTAGCATCAGTCAGTACGATCGTACGGTCA\n' > placeholder.fasta &&
+    micromamba run -n bip vsearch --makeudb_usearch placeholder.fasta --output "\$udb" --quiet &&
+#end if
+
 ## ---- run BIP inside its bundled conda env; the project name is the run name ----
 micromamba run -n bip bash /BIP/SCRIPTS/BIP.sh
     --platform '$platform_cond.platform'
@@ -66,6 +90,8 @@ micromamba run -n bip bash /BIP/SCRIPTS/BIP.sh
     --bin_maxaccepts '$advanced.bin_maxaccepts'
 #end if
     --wd "\$wd"
+    --refs "\$(pwd)/bip_refs"
+    --ref_seq_corr "\$(ls /BIP/REFS/reference_seqs_*.fasta | head -n 1)"
     '$project_name'
     < /dev/null &&
 
@@ -119,6 +145,19 @@ mv "\$wd/results/${project_name}_Report.pdf" "\$wd/results/Report.pdf"
                label="Existing primer dictionary (dictionary_BIP.tsv, optional)"
                help="A persistent dictionary_BIP.tsv from a previous run. New primer pairs from the spreadsheet's 'Dictionary Update' tab are merged into it."/>
 
+        <conditional name="bin_cond">
+            <param name="bin_mode" type="select" label="BIN matching (COI-5P only)"
+                   help="Assigns BOLD BINs to COI-5P barcodes. Needs a BOLD BIN index; choose 'No BIN matching' for other markers or to skip BINs.">
+                <option value="index" selected="true">Use a BOLD BIN index (.udb)</option>
+                <option value="none">No BIN matching</option>
+            </param>
+            <when value="index">
+                <param name="bin_udb" type="data" format="binary" label="BOLD BIN index (.udb)"
+                       help="A vsearch UDB index, e.g. BOLDistilled from BOLD: Upload, then 'Paste/Fetch data' with https://us-sea-1.linodeobjects.com/boldistilled/vsearch.zip (Galaxy unzips it). Your Galaxy may already provide one under Shared Data."/>
+            </when>
+            <when value="none"/>
+        </conditional>
+
         <conditional name="advanced">
             <param name="customize" type="select" label="Advanced tuning parameters">
                 <option value="no">Use BIP defaults</option>
@@ -164,10 +203,9 @@ mv "\$wd/results/${project_name}_Report.pdf" "\$wd/results/Report.pdf"
 
     <tests>
         <!--
-          Full end-to-end run of the bundled Nanopore demo. Asserts only on the
-          deterministic, always-present outputs. After the first green CI run,
-          tighten this: add expect_num_outputs and an <output_collection ...
-          count="N"/> for otu_details once the demo's primer-pair count is known.
+          Full end-to-end runs of the bundled Nanopore demo. bin_index_test.udb is a
+          small vsearch index of the 46 BOLDistilled records the demo's barcodes match,
+          so BIN matching is tested for real without the 6 GB BOLD index.
         -->
         <test>
             <param name="project_name" value="demo_run"/>
@@ -177,6 +215,17 @@ mv "\$wd/results/${project_name}_Report.pdf" "\$wd/results/Report.pdf"
                 <param name="reads" value="BAI109_demo.fastq.gz"/>
             </conditional>
             <param name="minreads" value="2"/>
+            <conditional name="bin_cond">
+                <param name="bin_mode" value="index"/>
+                <param name="bin_udb" value="bin_index_test.udb" ftype="binary"/>
+            </conditional>
+            <output_collection name="otu_details" type="list" count="1">
+                <element name="demo_run__C_LepFolF_C_LepFolR">
+                    <assert_contents>
+                        <has_text text="BOLD:"/>
+                    </assert_contents>
+                </element>
+            </output_collection>
             <output name="metrics">
                 <assert_contents>
                     <has_text text="BIP Run Parameters"/>
@@ -197,6 +246,47 @@ mv "\$wd/results/${project_name}_Report.pdf" "\$wd/results/Report.pdf"
                 </assert_contents>
             </output>
         </test>
+        <!-- No BIN matching: the run completes and every BIN is NA. -->
+        <test>
+            <param name="project_name" value="demo_nobin"/>
+            <param name="parameters" value="parameters.xlsx"/>
+            <conditional name="platform_cond">
+                <param name="platform" value="nanopore"/>
+                <param name="reads" value="BAI109_demo.fastq.gz"/>
+            </conditional>
+            <param name="minreads" value="2"/>
+            <conditional name="bin_cond">
+                <param name="bin_mode" value="none"/>
+            </conditional>
+            <output_collection name="otu_details" type="list" count="1">
+                <element name="demo_nobin__C_LepFolF_C_LepFolR">
+                    <assert_contents>
+                        <not_has_text text="BOLD:"/>
+                    </assert_contents>
+                </element>
+            </output_collection>
+            <output name="metrics">
+                <assert_contents>
+                    <has_text text="demo_nobin"/>
+                </assert_contents>
+            </output>
+        </test>
+        <!-- A zip supplied as the BIN index is rejected before BIP runs. -->
+        <test expect_failure="true">
+            <param name="project_name" value="demo_badindex"/>
+            <param name="parameters" value="parameters.xlsx"/>
+            <conditional name="platform_cond">
+                <param name="platform" value="nanopore"/>
+                <param name="reads" value="BAI109_demo.fastq.gz"/>
+            </conditional>
+            <conditional name="bin_cond">
+                <param name="bin_mode" value="index"/>
+                <param name="bin_udb" value="not_a_udb.zip" ftype="binary"/>
+            </conditional>
+            <assert_stderr>
+                <has_text text="the BIN index is not a vsearch UDB file"/>
+            </assert_stderr>
+        </test>
     </tests>
 
     <help><![CDATA[
@@ -216,6 +306,8 @@ produces per-well OTU tables with taxonomy, target/non-target status, quality me
 * *Reads* — non-demultiplexed FASTQ.gz. For Illumina paired-end, supply R1 and R2; for
   Nanopore/PacBio/other, supply one or more single-end FASTQ.gz files (concatenated).
 * *Primer dictionary* (optional) — a ``dictionary_BIP.tsv`` carried over from a previous run.
+* *BIN matching* — for COI-5P, a BOLD BIN index (vsearch ``.udb``) to assign BOLD BINs, or
+  *No BIN matching* for other markers or to skip BINs (every BIN is then ``NA``).
 
 **Outputs**
 
@@ -229,10 +321,16 @@ All outputs are named ``<project>_...``.
 
 **Notes**
 
-The bundled COI BOLDistilled SINTAX reference library and the error-correction reference
-set are baked into the container image. To use a different reference library, set the
-``Reference Library`` field in the spreadsheet's ``Dictionary Update`` tab; supplying a
-custom reference FASTA to the container is not yet exposed through this wrapper.
+**Getting a BIN index.** Your Galaxy may provide one under *Shared Data*. Otherwise, use
+BOLDistilled from BOLD: open *Upload*, choose *Paste/Fetch data*, and paste
+``https://us-sea-1.linodeobjects.com/boldistilled/vsearch.zip``. Galaxy downloads it
+(about 2 GB) and unzips it to the ~6 GB index; keep auto-decompress on, which is the
+default. Do this once and reuse the dataset. Searching it needs about 7 GB of memory.
+
+The COI BOLDistilled SINTAX reference library (taxonomy) and the error-correction
+reference set are built into the container image. Set the spreadsheet's ``Reference
+Library`` to ``BOLDistilled_COI_``; other reference libraries are not yet available
+through this wrapper.
     ]]></help>
 
     <expand macro="citations"/>
