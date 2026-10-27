@@ -1375,11 +1375,15 @@ process_primer_dir() {
     if [[ "$chimera_early" -eq 0 && "$ampsize" -ge 200 ]]; then
         T=$(date +%s); TL=$(date "+%Y-%m-%d %H:%M:%S")
         echo -e "******** Chimera screening OTU consensus sequences"
-        vsearch --uchime_denovo "$runid".corrected.fasta \
+        sed -E '/^>/ s/\|reads-([0-9]+)(.*)$/|reads-\1\2;size=\1/' \
+            "$runid".corrected.fasta > "$runid".sized.fasta
+        vsearch --uchime_denovo "$runid".sized.fasta \
             --abskew "$chimera_abskew" \
             --mindiv "$chimera_mindiv" \
             --nonchimeras "$runid".corrected.nochim.fasta \
+            --xsize \
             --threads $cores
+        rm -f "$runid".sized.fasta
         mv "$runid".corrected.nochim.fasta "$runid".corrected.fasta
         T2=$(date +%s); T2L=$(date "+%Y-%m-%d %H:%M:%S")
         log_step "${name}:Chimera removal" "$TL" "$T2L" $(( T2 - T ))
