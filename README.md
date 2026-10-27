@@ -143,7 +143,7 @@ The parameters spreadsheet (`.xlsx`) has three tabs: `Instructions`, `UMIs and P
 | **Reference Library** | Prefix of a SINTAX-formatted `.fasta` in `REFS/` (e.g., `BOLDistilled_COI_Apr2026` is fine for referring to `BOLDistilled_COI_Apr2026_SEQUENCES_sintax.fasta`). Must be an unambiguous prefix. If another file in `REFS/` shares it, the run fails with a "multiple files match" error. |
 | **Min / Max amplicon length** | Length filter, applied with UMIs and primers still attached |
 | **Target amplicon length** | **Required.** Expected clean amplicon length (no primers/UMIs). Also used to break ties between candidate barcodes (closest to this length wins) and, for COI-5P, to decide whether full-length checks (reading frame, NUMTs) apply |
-| **Primary / Secondary OTU clustering threshold** | vsearch clustering identity thresholds (within-well, then across-run) |
+| **Primary / Secondary OTU clustering threshold** | vsearch identity thresholds. Primary threshold used for clustering each well’s reads; secondary threshold used as minimum consensus sequence similarity value used in merging each well's primary clusters  |
 | **Tax assign probability threshold** | SINTAX confidence cutoff |
 | **BIN assign threshold** | Minimum identity to accept a BOLD BIN match (used for COI-5P only) |
 
