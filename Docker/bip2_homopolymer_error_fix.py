@@ -45,11 +45,11 @@ def match_by_vsearch(qry_file,reference_set):
                        '--blast6out',
                        output_file,
                        '--id', '0.7',
-                       '--maxaccepts', '1',
+                       '--maxaccepts', '3',
                        '--maxhits', '1'
                        ]
 
-    subprocess.run(vsearch_command)
+    subprocess.run(vsearch_command, check=True)
 
     with open(output_file, 'r', newline='') as f:
         reader = csv.reader(f, delimiter='\t')

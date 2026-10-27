@@ -203,10 +203,11 @@ plot3 <- ggplot(otus_hist, aes(x = factor(bin_otus, levels = otu_labels), y = Fr
 
 # Denominator: non-control samples per plate PER primer pair, taken straight from
 # the parameters file (not the OTU results).
+
 plate_primer_totals <- params %>%
   filter(!Sample %in% ctrl_samples) %>%
   group_by(Plate, primer_pair) %>%
-  summarise(Total = n(), .groups = "drop")
+  summarise(Total = n_distinct(Sample), .groups = "drop")
 
 # Numerator: unique non-control samples with a target barcode, per plate per primer pair
 target_per_plate <- otu_all %>%
@@ -333,10 +334,12 @@ pct_nontarget      <- round(n_nontarget / max(total_otus, 1) * 100, 1)
 
 total_nonctrl_samples <- length(unique(params$Sample[!params$Sample %in% ctrl_samples]))
 
-# Per-primer denominator: sum params-based non-control counts across plates for each primer
-primer_totals <- plate_primer_totals %>%
+# Per-primer denominator: distinct non-control samples for each primer pair, counted
+# directly rather than summed over plates, so a sample on two plates counts once
+primer_totals <- params %>%
+  filter(!Sample %in% ctrl_samples) %>%
   group_by(primer_pair) %>%
-  summarise(TotalSamples = sum(Total), .groups = "drop")
+  summarise(TotalSamples = n_distinct(Sample), .groups = "drop")
 
 primer_success_df <- otu_all %>%
   filter(Barcode_Status == "target") %>%

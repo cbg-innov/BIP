@@ -66,7 +66,7 @@ chimera_abskew=10
 chimera_mindiv=0.0005
 # Parameters for VSEARCH's usearch_global command (BIN matching).
 bin_maxhits=1
-bin_maxaccepts=1
+bin_maxaccepts=3
 # In-frame sequence lengths accepted for the protein-coding COI-5P marker. An OTU whose
 # length is not in this list is flagged as an indel (and typed as a NUMT), which makes it
 # ineligible as a target barcode. Comma-separated integers, passed to bip3. Update this
@@ -378,43 +378,12 @@ log_count() {
     echo -e "${runid}\t${stage}\t${primer}\t${count}" >> "$counts_file"
 }
 
-get_length_bounds() {
-    local primer="$1"
-
-    awk -F'\t' -v primer="$primer" '
-    function trim(x) {
-        gsub(/\r/, "", x)
-        gsub(/^[ \t]+|[ \t]+$/, "", x)
-        return x
-    }
-
-    NR==1 {
-        for (i=1; i<=NF; i++) h[$i]=i
-        next
-    }
-
-    {
-        f = trim($h["Forward Primer Name"])
-        r = trim($h["Reverse Primer Name"])
-        key = f "_" r
-
-        if (key == primer) {
-            min = $h["Min amplicon length"]
-            max = $h["Max amplicon length"]
-
-            print min "\t" max
-            exit
-        }
-    }
-    ' "$dictfile"
-}
-
 filter_by_length() {
     local primer="$1"
     local infile="$2"
     local outfile="$3"
-
-    read min max < <(get_length_bounds "$primer")
+    local min="$4"
+    local max="$5"
 
     seqkit seq -m "$min" -M "$max" "$infile" > "$outfile"
 
@@ -780,10 +749,10 @@ process_primer_dir() {
 
     cd "$name" || exit 1
 
-    IFS=$'\t' read ampsize minlen maxlen otu_primary otu_secondary \
+    IFS=$'\037' read -r ampsize minlen maxlen otu_primary otu_secondary \
          tax_prob fwd_primer_seq rev_primer_seq marker reflib bin_thresh <<< "$(
 
-    awk -F'\t' -v OFS='\t' -v p="$name" \
+    awk -F'\t' -v OFS='\037' -v p="$name" \
         -v cfp="$COL_FWD_PRIMER" -v crp="$COL_REV_PRIMER" \
         -v c_amp="$COL_AMPLEN" -v c_min="$COL_MINLEN" -v c_max="$COL_MAXLEN" \
         -v c_prim="$COL_OTU_PRIMARY" -v c_sec="$COL_OTU_SECONDARY" -v c_tax="$COL_TAX_PROB" \
@@ -829,7 +798,7 @@ process_primer_dir() {
     T=$(date +%s); TL=$(date "+%Y-%m-%d %H:%M:%S")
 
     local len_fq="${name}.len.fastq"
-    filter_by_length "$name" "$fq" "$len_fq"
+    filter_by_length "$name" "$fq" "$len_fq" "$minlen" "$maxlen"
 
     T2=$(date +%s); T2L=$(date "+%Y-%m-%d %H:%M:%S")
     log_step "${name}:Size filtering" "$TL" "$T2L" $(( T2 - T ))
@@ -1049,18 +1018,22 @@ process_primer_dir() {
         # Merge linked and singleton reads into sample FASTQs
         # ---------------------------
 
-        awk -F'\t' -v p="$name" -v cfp="$COL_FWD_PRIMER" -v crp="$COL_REV_PRIMER" \
+        # A sample can occupy several wells, so its file is emptied only the first time
+        # the sample comes up and every well's reads are appended to it.
+        local -A sample_started=()
+
+        awk -F'\t' -v OFS='\037' -v p="$name" -v cfp="$COL_FWD_PRIMER" -v crp="$COL_REV_PRIMER" \
             -v c_samp="$COL_SAMPLE" -v c_fu="$COL_FWD_UMI" -v c_ru="$COL_REV_UMI" '
         NR>1 {
             key = $cfp "_" $crp
 
             if (key == p) {
-                print $c_samp "\t" $c_fu "\t" $c_ru
+                print $c_samp, $c_fu, $c_ru
             }
         }
         ' $wkdir/parameters.tsv |
 
-        while IFS=$'\t' read -r sample fwd_umi rev_umi; do
+        while IFS=$'\037' read -r sample fwd_umi rev_umi; do
 
             fwd_umi=$(echo "$fwd_umi" | tr '[:lower:]' '[:upper:]')
             rev_umi=$(echo "$rev_umi" | tr '[:lower:]' '[:upper:]')
@@ -1072,8 +1045,11 @@ process_primer_dir() {
             local fwd_pattern="${fwd_umi}_fwd"
             local rev_pattern="${rev_umi}_rev"
 
-            # start fresh
-            > "$sample_out"
+            # start fresh on the sample's first well only
+            if [[ -z "${sample_started[$sample_out]:-}" ]]; then
+                > "$sample_out"
+                sample_started[$sample_out]=1
+            fi
 
             # ---------------------------
             # linked 1-1 reads
@@ -1137,6 +1113,7 @@ process_primer_dir() {
         # file with the near-empty file for the other marker's reverse UMI (which
         # only caught stray reads in this subdirectory). The symmetrical merge loop
         # already filters this way.
+        local -A sample_started=()
         awk -F'\t' -v p="$name" \
             -v c_samp="$COL_SAMPLE" -v c_fu="$COL_FWD_UMI" -v c_ru="$COL_REV_UMI" \
             -v cfp="$COL_FWD_PRIMER" -v crp="$COL_REV_PRIMER" '
@@ -1148,16 +1125,23 @@ process_primer_dir() {
             sample = $c_samp
             primer = $cfp "_" $crp
 
-            print fwd "_" rev "\t" sample "\t" primer
+            print fwd "_" rev "\037" sample "\037" primer
         }
         ' $wkdir/parameters.tsv |
-        while IFS=$'\t' read -r umi_pair sample primer; do
+        while IFS=$'\037' read -r umi_pair sample primer; do
 
             old_file="${umi_pair}.fastq"
             new_file="${sample}__${name}.fastq"
 
+            # A sample can occupy several wells: the first well's file becomes the
+            # sample file and later wells are appended to it, not moved over it.
             if [[ -f "$old_file" ]]; then
-                mv "$old_file" "$new_file"
+                if [[ -z "${sample_started[$new_file]:-}" ]]; then
+                    mv "$old_file" "$new_file"
+                    sample_started[$new_file]=1
+                else
+                    cat "$old_file" >> "$new_file" && rm -f "$old_file"
+                fi
             fi
 
         done
@@ -1368,7 +1352,6 @@ process_primer_dir() {
         log_step "${name}:Indel correction" "$TL" "$T2L" $(( T2 - T ))
     else
         mv "$runid".fasta "$runid".corrected.fasta
-        rm "$runid".fasta
     fi
 
     # Chimera screening of OTU consensus sequences (non-PE / long-read mode)
@@ -1537,11 +1520,11 @@ PYEOF
     rm "$runid".table "$runid".corrected.fasta
 
     # count reads in target and NTS OTUs
-    otureadcount=$(awk -F'\t' 'NR > 1 { sum += $4 } END {print sum}' "${runid}__${name}__OTUDetails.tsv")
+    otureadcount=$(awk -F'\t' 'NR > 1 { sum += $4 } END { print sum + 0 }' "${runid}__${name}__OTUDetails.tsv")
     echo -e "${runid}\tReadsInOTUs\t${name}\t${otureadcount}" >> "$counts_file"
 
     # count reads in target OTUs
-    targetreadcount=$(awk -F'\t' 'NR > 1 && $5 == "target" { sum += $4 } END { print sum }' "${runid}__${name}__OTUDetails.tsv")
+    targetreadcount=$(awk -F'\t' 'NR > 1 && $5 == "target" { sum += $4 } END { print sum + 0 }' "${runid}__${name}__OTUDetails.tsv")
     echo -e "${runid}\tReadsInTargetBarcodes\t${name}\t${targetreadcount}" >> "$counts_file"
 
     # clean up primer directory
@@ -1627,7 +1610,7 @@ tsvfile="parameters.tsv"
 export param_file tsvfile
 
 python3 - <<'EOF'
-import os, sys
+import os, re, sys
 import pandas as pd
 
 # Sheet and column names come from the COLUMN NAMES block at the top of this
@@ -1707,6 +1690,30 @@ if had_tax.any():
     df.loc[is_ctrl, tax_cols] = pd.NA
     print(f"NOTE: cleared taxonomy from {int(had_tax.sum())} negative-control row(s) "
           f"(columns: {', '.join(tax_cols)}).")
+
+# Rename similarly named negative controls per plate, e.g. NC -> NC_Plate01.
+plate_name = os.environ["COLNAME_PLATE"]
+if plate_name in df.columns:
+    def plate_label(v):
+        v = str(v).strip()
+        v = v[:-2] if v.endswith(".0") else v
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", v)
+    ctrl_rows = is_ctrl & present & df[plate_name].notna()
+    n_plates  = df.loc[ctrl_rows].groupby(samp_name)[plate_name].nunique()
+    shared    = n_plates[n_plates > 1].index
+    if len(shared):
+        rows    = ctrl_rows & df[samp_name].isin(shared)
+        renamed = df.loc[rows, samp_name] + "_" + df.loc[rows, plate_name].map(plate_label)
+        taken   = set(df.loc[present & ~rows, samp_name])
+        clash   = sorted(set(renamed) & taken)
+        if clash:
+            sys.exit(f"ERROR: negative controls sharing a name across plates are renamed per plate, "
+                     f"but {clash} already exist as sample names. Give each plate's control a "
+                     f"unique name in the '{sheet}' sheet.")
+        df.loc[rows, samp_name] = renamed
+        print(f"NOTE: {len(shared)} negative-control name(s) used on more than one plate were "
+              f"renamed per plate so each plate keeps its own control: "
+              f"{', '.join(map(str, shared))} -> <name>_<plate>.")
 
 df.to_csv(tsvfile, sep="\t", index=False)
 EOF

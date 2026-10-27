@@ -51,7 +51,6 @@ library(readr)
 
 # input OTU consensus sequences and tax ID results
 input.fasta <- readDNAStringSet(sprintf("%s.corrected.fasta", runid))
-input.table <- read.table(sprintf("%s.table", runid), header = TRUE, fill = TRUE, sep = "\t", row.names = NULL)
 input.table <- read_tsv(sprintf("%s.table", runid), col_names = TRUE)
 if(nrow(input.table) == 0) {
   input.table <- data.frame("SeqName" = names(input.fasta),
@@ -124,14 +123,15 @@ input.tax <- read.delim("../parameters.tsv",
                          stringsAsFactors = FALSE,
                          check.names = FALSE)
 # parameters.tsv holds one row per WELL and covers EVERY primer pair, so a sample
-# run under two markers appears more than once. Merging that straight onto the OTU
-# table fans out - every OTU is emitted once per matching row - which double-counts
-# reads and makes the duplicated rows tie on ReadCount, demoting genuine Dominant
-# OTUs to "Tied" and losing their barcodes. Restrict to this primer pair's rows and
+# run under two markers appears more than once. Restrict to this primer pair's rows and
 # keep one row per sample before merging.
 input.tax <- input.tax[
   paste(input.tax[["Forward Primer Name"]],
         input.tax[["Reverse Primer Name"]], sep = "_") == primers, ]
+# A sample can occupy wells on more than one plate; keep every plate it is on (for
+# plate-specific control subtraction) before reducing to one row per sample.
+sample_plates <- lapply(split(as.character(input.tax$Plate), input.tax$Sample),
+                        function(p) sort(unique(p[!is.na(p) & p != ""])))
 input.tax <- input.tax[!duplicated(input.tax$Sample), ]
 
 # Target amplicon length drives the sequence-length tie-break during barcode inference.
@@ -172,8 +172,11 @@ is_control_value <- function(x) {
   !is.na(x) & (v %in% c("yes", "y") | grepl("^1(\\.0+)?$", v))
 }
 ctrl_samples <- input.tax$Sample[is_control_value(input.tax[["Negative Control"]])]
-sample_plate <- setNames(as.character(input.tax$Plate), input.tax$Sample)
-output$Plate <- as.character(unname(sample_plate[output$Sample]))
+plates_of <- function(s) if (s %in% names(sample_plates)) sample_plates[[s]] else character(0)
+output$Plate <- vapply(output$Sample, function(s) {
+  p <- plates_of(s)
+  if (length(p) == 0) NA_character_ else paste(p, collapse = ";")
+}, character(1), USE.NAMES = FALSE)
 output$Reads_Subtracted <- rep(0, nrow(output))
 is_ctrl_otu  <- output$Sample %in% ctrl_samples
 contaminants <- output[is_ctrl_otu, ]
@@ -189,7 +192,11 @@ subtraction_log <- data.frame(RunID = character(0), Plate = character(0), Sample
                               Sequence_Name = character(0), stringsAsFactors = FALSE)
 removed_by_sub <- rep(FALSE, nrow(output))
 
-cand <- which(!is_ctrl_otu & !is.na(output$Plate) & output$Plate %in% contaminants$Plate)
+# plates that at least one control OTU came from
+ctrl_plates <- unique(unlist(lapply(unique(contaminants$Sample), plates_of)))
+cand <- which(!is_ctrl_otu &
+              vapply(output$Sample, function(s) any(plates_of(s) %in% ctrl_plates), logical(1),
+                     USE.NAMES = FALSE))
 if (nrow(contaminants) > 0 && length(cand) > 0) {
   q <- DNAStringSet(output$Sequence[cand]);  names(q) <- paste0("q", seq_along(cand))
   d <- DNAStringSet(contaminants$Sequence);  names(d) <- paste0("c", seq_len(nrow(contaminants)))
@@ -208,7 +215,9 @@ if (nrow(contaminants) > 0 && length(cand) > 0) {
   if (nrow(hits) > 0) {
     hits$oi <- cand[as.integer(sub("^q", "", hits$q))]          # row in output
     hits$ci <- as.integer(sub("^c", "", hits$c))                # row in contaminants
-    hits <- hits[output$Plate[hits$oi] == contaminants$Plate[hits$ci], ]   # same plate only
+    same_plate <- mapply(function(s, cs) any(plates_of(s) %in% plates_of(cs)),
+                         output$Sample[hits$oi], contaminants$Sample[hits$ci], USE.NAMES = FALSE)
+    hits <- hits[as.logical(same_plate), ]                                  # same plate only
   }
   if (nrow(hits) > 0) {
     # each OTU is charged its highest-read matching contaminant on its plate
@@ -353,17 +362,18 @@ output$LowRankScore <- if (length(low_cols) == 0) {
 
 # add dominant tag to output table
 output <- output[order(output$Sample, -output$ReadCount),]
-output$OTURank <- "Secondary"
+# rep(), not a bare value: control subtraction can leave a zero-row table
+output$OTURank <- rep("Secondary", nrow(output))
 topotu <- which(!duplicated(output$Sample))
 output$OTURank[topotu] <- "Dominant"
 
-# add tied tag to output table
-for(i in 1:(nrow(output)-1)){
-  if(output$OTURank[i] == "Dominant" && output$Sample[i] == output$Sample[i+1] && output$ReadCount[i] == output$ReadCount[i+1]) {
-    output$OTURank[i] <- "Tied"
-    output$OTURank[i+1] <- "Tied"
-  }
-}
+# add tied tag to output table: when other OTUs have the same read count as the Dominant,
+# all of them, the Dominant included, become Tied, however many there are (a pairwise loop
+# missed the third OTU in a three-way tie and crashed on a single-row table)
+top_reads <- ave(output$ReadCount, output$Sample, FUN = max)
+is_top    <- output$ReadCount == top_reads
+n_top     <- ave(as.integer(is_top), output$Sample, FUN = sum)
+output$OTURank[is_top & n_top > 1] <- "Tied"
 
 # The in-frame COI checks below (indel flag, NUMT category, mtCOI required for a target)
 # assume a full-length barcode, so they apply only when this primer pair's target amplicon
@@ -379,7 +389,7 @@ full_length_coi <- marker == "TRUE" &&
 # expected_lengths comes from coi_expected_lengths in the advanced parameters of BIP.sh
 ifelse(full_length_coi,
        output$INDEL <- ifelse(output$SeqLength %in% expected_lengths, FALSE, TRUE),
-       output$INDEL <- FALSE)
+       output$INDEL <- rep(FALSE, nrow(output)))
 output$HMM <- ifelse(output$INDEL == FALSE & output$STOPCODON == FALSE, "OK", "HMM_ISSUE")
 
 # split SINTAX results (with probabilities) into their own columns by rank prefix
@@ -405,10 +415,12 @@ parse_sintax <- function(tax_string) {
   result
 }
 
-df_split <- as.data.frame(
-  t(sapply(output$TaxAssign, parse_sintax)),
-  stringsAsFactors = FALSE
-)
+df_split <- if (nrow(output) > 0) {
+  as.data.frame(t(sapply(output$TaxAssign, parse_sintax)), stringsAsFactors = FALSE)
+} else {
+  # control subtraction removed every OTU: keep the columns, with no rows
+  as.data.frame(t(parse_sintax(NA))[0, , drop = FALSE], stringsAsFactors = FALSE)
+}
 
 # Combine the split data back into the original data frame
 output <- cbind(output, df_split)
@@ -422,7 +434,7 @@ output$OTUCategory <- if(full_length_coi){
                                 ifelse(output$INDEL == FALSE & output$STOPCODON == TRUE, "NUMT",
                                     ifelse(output$HMM != "HMM_ISSUE", "mtCOI", "unknown"))))
 } else{
-  output$OTUCategory <- "unknown"
+  output$OTUCategory <- rep("unknown", nrow(output))
 }
                             
 output$OTUCategory[is.na(output$OTUCategory)] <- "unknown"
@@ -484,7 +496,8 @@ output <- output %>%
   ungroup()
 
 # Add detail to Tax_Match results (mismatch_at_X if confirmed mismatch, blank otherwise)
-output$Tax_Match_Annotated <- apply(output, 1, function(row) {
+# (apply() calls the function once with a dummy row on a zero-row table, so skip it then)
+output$Tax_Match_Annotated <- if (nrow(output) == 0) character(0) else apply(output, 1, function(row) {
   matches <- row[rank_match_cols]
   if (row["Tax_Match"] == "MISMATCH") {
     for (rank in ranks) {
@@ -528,7 +541,7 @@ if(marker == "TRUE"){
       Probability_Family = SINTAX_Family_Prob,
       Probability_Genus = SINTAX_Genus_Prob,
       Probability_Species = SINTAX_Species_Prob,
-      User_Kindgom = USER.Kingdom,
+      User_Kingdom = USER.Kingdom,
       User_Phylum = USER.Phylum,
       User_Class = USER.Class,
       User_Order = USER.Order,
@@ -571,7 +584,7 @@ if(marker == "TRUE"){
       Probability_Family = SINTAX_Family_Prob,
       Probability_Genus = SINTAX_Genus_Prob,
       Probability_Species = SINTAX_Species_Prob,
-      User_Kindgom = USER.Kingdom,
+      User_Kingdom = USER.Kingdom,
       User_Phylum = USER.Phylum,
       User_Class = USER.Class,
       User_Order = USER.Order,
