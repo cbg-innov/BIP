@@ -65,8 +65,11 @@ minoverlap=0.75
 chimera_abskew=10
 chimera_mindiv=0.0005
 # Parameters for VSEARCH's usearch_global command (BIN matching).
+# maxaccepts/maxrejects are set well above vsearch's defaults (1/32) so the search keeps
+# going past the first acceptable hit and reports the closest one, not just the first found.
 bin_maxhits=1
-bin_maxaccepts=3
+bin_maxaccepts=32
+bin_maxrejects=256
 # In-frame sequence lengths accepted for the protein-coding COI-5P marker. An OTU whose
 # length is not in this list is flagged as an indel (and typed as a NUMT), which makes it
 # ineligible as a target barcode. Comma-separated integers, passed to bip3. Update this
@@ -169,6 +172,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --bin_maxaccepts)
             bin_maxaccepts="$2"
+            shift 2
+            ;;
+        --bin_maxrejects)
+            bin_maxrejects="$2"
             shift 2
             ;;
         --coi_expected_lengths)
@@ -1465,6 +1472,7 @@ process_primer_dir() {
             --id "$bin_thresh" \
             --maxhits "$bin_maxhits" \
             --maxaccepts "$bin_maxaccepts" \
+            --maxrejects "$bin_maxrejects" \
             --threads $cores; then
             echo "ERROR: BIN matching failed for $name (vsearch could not build or search $vsearch_udb)."
             echo "  The run will continue with BIN set to NA for this primer pair."

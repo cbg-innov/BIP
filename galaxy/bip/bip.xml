@@ -88,6 +88,7 @@ micromamba run -n bip bash /BIP/SCRIPTS/BIP.sh
     --chimera_mindiv '$advanced.chimera_mindiv'
     --bin_maxhits '$advanced.bin_maxhits'
     --bin_maxaccepts '$advanced.bin_maxaccepts'
+    --bin_maxrejects '$advanced.bin_maxrejects'
 #end if
     --wd "\$wd"
     --refs "\$(pwd)/bip_refs"
@@ -180,7 +181,8 @@ mv "\$wd/results/${project_name}_Report.pdf" "\$wd/results/Report.pdf"
                 <param name="chimera_abskew" type="float" value="10" label="Chimera abskew (--chimera_abskew)"/>
                 <param name="chimera_mindiv" type="float" value="0.0005" label="Chimera mindiv (--chimera_mindiv)"/>
                 <param name="bin_maxhits" type="integer" value="1" label="BIN match maxhits (--bin_maxhits)"/>
-                <param name="bin_maxaccepts" type="integer" value="1" label="BIN match maxaccepts (--bin_maxaccepts)"/>
+                <param name="bin_maxaccepts" type="integer" value="32" label="BIN match maxaccepts (--bin_maxaccepts)"/>
+                <param name="bin_maxrejects" type="integer" value="256" label="BIN match maxrejects (--bin_maxrejects)"/>
             </when>
         </conditional>
     </inputs>

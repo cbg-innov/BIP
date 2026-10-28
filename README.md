@@ -174,7 +174,8 @@ A handful of parameters (UMI/primer overlap minimums, per-base error tolerances,
 | `--chimera_abskew` | `10` | `vsearch --uchime_denovo` `abskew` parameter. |
 | `--chimera_mindiv` | `0.0005` | `vsearch --uchime_denovo` `mindiv` parameter. |
 | `--bin_maxhits` | `1` | `vsearch --usearch_global` `maxhits` parameter (BIN matching). |
-| `--bin_maxaccepts` | `1` | `vsearch --usearch_global` `maxaccepts` parameter (BIN matching). |
+| `--bin_maxaccepts` | `32` | `vsearch --usearch_global` `maxaccepts` parameter (BIN matching). |
+| `--bin_maxrejects` | `256` | `vsearch --usearch_global` `maxrejects` parameter (BIN matching). |
 | `--coi_expected_lengths` | `640,643,…,670,673` | In-frame COI-5P barcode lengths. Other lengths are flagged as indels/NUMTs and cannot be the target; the list's range also sets which amplicons get full-length COI checks. |
 
 ---

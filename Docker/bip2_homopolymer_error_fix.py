@@ -45,7 +45,8 @@ def match_by_vsearch(qry_file,reference_set):
                        '--blast6out',
                        output_file,
                        '--id', '0.7',
-                       '--maxaccepts', '3',
+                       '--maxaccepts', '32',
+                       '--maxrejects', '256',
                        '--maxhits', '1'
                        ]
 

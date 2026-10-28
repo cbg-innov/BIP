@@ -242,11 +242,15 @@ if (nrow(contaminants) > 0 && length(cand) > 0) {
       contaminants$Reads_Subtracted_Total[j] <- sum(pmin(best$creads[k], before[k]))
       contaminants$OTUs_Removed[j]           <- sum(gone[k])
     }
-    # keep the read count in each sequence name in step with the new count
+    # keep the read count in each sequence name in step with the new count. Skipped when
+    # every matched OTU was removed: mapply() over nothing returns list(), and assigning
+    # that turns the whole SeqName column into a list, which write.table cannot write.
     hit_rows <- best$oi[!gone]
-    output$SeqName[hit_rows] <- mapply(function(n, r) sub("\\|reads-[0-9]+", paste0("|reads-", r), n),
-                                       output$SeqName[hit_rows], as.integer(output$ReadCount[hit_rows]),
-                                       USE.NAMES = FALSE)
+    if (length(hit_rows)) {
+      output$SeqName[hit_rows] <- mapply(function(n, r) sub("\\|reads-[0-9]+", paste0("|reads-", r), n),
+                                         output$SeqName[hit_rows], as.integer(output$ReadCount[hit_rows]),
+                                         USE.NAMES = FALSE)
+    }
   }
 }
 contam_out <- data.frame(
