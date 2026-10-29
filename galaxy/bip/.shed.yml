@@ -5,8 +5,10 @@ long_description: |
   BIP (Barcode Inference Pipeline) turns raw, non-demultiplexed sequencing reads and a
   parameters spreadsheet into per-well OTU tables with taxonomy, target/non-target status,
   quality metrics, and (for COI-5P) BOLD BIN assignments. It supports Illumina paired-end,
-  PacBio, Oxford Nanopore, and generic single-end data. All dependencies and reference
-  libraries ship inside a single Docker image on GHCR.
+  PacBio, Oxford Nanopore, and generic single-end data. All dependencies, the BOLDistilled
+  COI taxonomy library and the indel-correction reference set ship inside a single Docker
+  image on GHCR; for BIN matching, users supply a BOLD BIN index (vsearch .udb). The Galaxy
+  tool currently supports COI-5P primer pairs only.
 homepage_url: https://github.com/cbg-innov/BIP
 remote_repository_url: https://github.com/cbg-innov/BIP/tree/main/galaxy/bip
 type: unrestricted

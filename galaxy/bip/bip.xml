@@ -148,7 +148,7 @@ mv "\$wd/results/${project_name}_Report.pdf" "\$wd/results/Report.pdf"
 
         <conditional name="bin_cond">
             <param name="bin_mode" type="select" label="BIN matching (COI-5P only)"
-                   help="Assigns BOLD BINs to COI-5P barcodes. Needs a BOLD BIN index; choose 'No BIN matching' for other markers or to skip BINs.">
+                   help="Assigns BOLD BINs to COI-5P barcodes. Needs a BOLD BIN index; choose 'No BIN matching' to skip BINs.">
                 <option value="index" selected="true">Use a BOLD BIN index (.udb)</option>
                 <option value="none">No BIN matching</option>
             </param>
@@ -308,8 +308,14 @@ produces per-well OTU tables with taxonomy, target/non-target status, quality me
 * *Reads* — non-demultiplexed FASTQ.gz. For Illumina paired-end, supply R1 and R2; for
   Nanopore/PacBio/other, supply one or more single-end FASTQ.gz files (concatenated).
 * *Primer dictionary* (optional) — a ``dictionary_BIP.tsv`` carried over from a previous run.
-* *BIN matching* — for COI-5P, a BOLD BIN index (vsearch ``.udb``) to assign BOLD BINs, or
-  *No BIN matching* for other markers or to skip BINs (every BIN is then ``NA``).
+* *BIN matching* — a BOLD BIN index (vsearch ``.udb``) to assign BOLD BINs, or
+  *No BIN matching* to skip BINs (every BIN is then ``NA``).
+
+**This Galaxy tool currently supports COI-5P only.** The container holds only the COI
+BOLDistilled reference library, and the tool has no input for another one, so a primer pair
+whose ``Reference Library`` is anything other than ``BOLDistilled_COI_`` stops the run
+before any processing. For other markers, run BIP from its Docker image with your own
+reference library (see the BIP README).
 
 **Outputs**
 

@@ -141,7 +141,7 @@ A control name used on more than one plate (e.g. `NC` on every plate) is renamed
 |---|---|
 | **Forward / Reverse Primer Name** | Name referenced in the `UMIs and Primers` tab |
 | **Forward / Reverse Primer Sequence** | The actual primer sequence (5' to 3')|
-| **Marker** | Locus name (e.g., `COI-5P` for the COI barcode region, anything else for all other markers) |
+| **Marker** | Locus name. Use exactly `COI-5P` for the COI barcode region: only that exact value turns on indel correction, NUMT checks and BIN matching. Any other value, including variants such as `COI-5P marine`, is treated as a non-COI marker |
 | **Reference Library** | Prefix of a SINTAX-formatted `.fasta` in `REFS/` (e.g., `BOLDistilled_COI_Apr2026` is fine for referring to `BOLDistilled_COI_Apr2026_SEQUENCES_sintax.fasta`). Must be an unambiguous prefix. If another file in `REFS/` shares it, the run fails with a "multiple files match" error. |
 | **Min / Max amplicon length** | Length filter, applied with UMIs and primers still attached |
 | **Target amplicon length** | **Required.** Expected clean amplicon length (no primers/UMIs). Also used to break ties between candidate barcodes (closest to this length wins) and, for COI-5P, to decide whether full-length checks (reading frame, NUMTs) apply |
@@ -208,15 +208,46 @@ Written to `<wkdir>/<RunName>_results/`:
 - **`<RunName>_Report.pdf`** — summary report.
 - **`publication_metrics.txt`** — BIP version, run parameters, software versions, and system info often required for publication.
 - **`duration_log.txt`** — per-stage timing.
-- **`<PrimerPair>/`** — per-primer-pair OTU details (`<RunName>__<PrimerPair>__OTUDetails.tsv`), consensus FASTA files, and error-correction intermediates. Also:
+- **`<PrimerPair>/`** — one folder per primer pair, containing:
+  - **`sequences_barcodes.fasta`** — the inferred barcode for each sample: at most one sequence per sample, all the OTUs with `Barcode_Status` `target`.
+  - **`sequences_nts.fasta`** — every other OTU (non-target sequences).
+  - **`<RunName>__<PrimerPair>__OTUDetails.tsv`** — one row per OTU, with the columns described [below](#otudetailstsv-columns).
   - **`…__ControlContaminants.tsv`** — every OTU found in a negative-control well, with the reads it removed from same-plate OTUs.
   - **`…__ControlSubtraction.tsv`** — every OTU that lost reads to a contaminant: reads before and after, and whether it was removed.
+  - **`<PrimerPair>_OTU_clustering.log`**, **`OTU_Component_Reads/`** and, for COI-5P, **`Error_Correction_Files/`** — per-sample clustering output, the reads behind each OTU, and indel-correction alignments.
 
-  Control-well OTUs do not appear in `OTUDetails.tsv` or the FASTA files, read counts there are after subtraction, and the last column, `Reads_Subtracted`, gives the reads removed from each OTU.
+  Control-well OTUs do not appear in `OTUDetails.tsv` or the FASTA files, and read counts there are after subtraction.
 - **`Miscelleneous_Files/`** — read-count summaries, the merged parameters TSV, and other intermediate files.
 - **`Individual_Raw_Fastq_Files.tar.gz`** — per-well demultiplexed reads, often required for SRA archiving for publication.
 
 Your original `.fastq.gz`/`.fastq`, `.xlsx`, `dictionary_BIP.tsv`, and `compose.yaml` (if present) stay at the top level of `wkdir`. They are never moved or archived into the results folder, so nothing is lost if you delete `<RunName>_results/` and rerun.
+
+### OTUDetails.tsv columns
+
+Columns marked *COI-5P* appear only for primer pairs whose Marker is `COI-5P` (BIN columns also need a target amplicon of at least 300 bp). The COI reading-frame checks (`Indel`, `Stop_Codon`, `OTU_Category`) are applied only when the target amplicon length is a full-length barcode, i.e. within the `--coi_expected_lengths` range.
+
+| Column | Meaning |
+|---|---|
+| `RunID` | The run name. |
+| `Sample` | Sample name. The sample's barcode keeps the plain name; its other OTUs are suffixed `.NTS1`, `.NTS2`, … |
+| `OTU_Name` | OTU within the sample (`OTU0`, `OTU1`, …). |
+| `Read_Count` | Reads in the OTU, after negative-control subtraction. |
+| `Barcode_Status` | `target` (the sample's inferred barcode, at most one per sample) or `NTS` (non-target sequence). An OTU is NTS if its kingdom is unknown, it is not `mtCOI` (*COI-5P*), its taxonomy mismatches the expected taxonomy, more than 1% of its bases are ambiguous, another OTU in the sample was chosen, or it is in a tie that could not be broken. The columns below show which applied. |
+| `Sequence_Length` | Length of the OTU sequence in bp. |
+| `Kingdom` … `Species` | SINTAX taxonomy. A rank is `unknown` when its probability is below the primer pair's tax assign probability threshold. |
+| `Ambiguous_Base_Count` | Number of ambiguous bases (`N`/`n`), including any `n` added by indel correction. |
+| `Indel` | *COI-5P.* `TRUE` if the length is not one of `--coi_expected_lengths` (out of frame). |
+| `Stop_Codon` | *COI-5P.* `TRUE` if indel correction found a stop codon in the translated sequence (the `STOP` flag in `Sequence_Name`). |
+| `Tax_Match` | Blank if the taxonomy agrees with the expected taxonomy down to `--min_rank_match`; otherwise `mismatch_at_<rank>`, the highest rank that disagrees. |
+| `Sequence_Name` | FASTA name: `<Sample>__<PrimerPair>\|OTU<n>\|reads-<N>`. For *COI-5P*, indel correction may append `autoedit` (a homopolymer indel was corrected), `check` (an alignment-only correction was suggested but not applied), `indel` (an indel could not be corrected), `STOP` (stop codon) or `no_match` (no reference found for correction). |
+| `Sequence` | The OTU consensus sequence. |
+| `OTU_Rank` | `Dominant` (most reads in the sample), `Tied` (shares the highest read count with another OTU) or `Secondary`. |
+| `OTU_Category` | *COI-5P.* `mtCOI` (in frame, no stop codon), `NUMT` (length outside the expected range, or a stop codon without an indel) or `unknown` (an indel or stop codon that could not be resolved). |
+| `Probability_<rank>` | SINTAX's support (0–1) for its best name at that rank. It is shown even when below the threshold, where the name is `unknown`, so you can see how close it came. `NA` if the reference library has no name at that rank. |
+| `User_<rank>` | The expected taxonomy from the parameters file (`unknown` if left blank). |
+| `<rank>_Match` | `OK`, `MISMATCH` or `UNKNOWN` (either side unknown) for each rank. A mismatch at one rank marks every lower rank `MISMATCH` too. |
+| `Reads_Subtracted` | Reads removed from this OTU by negative-control subtraction. |
+| `BIN`, `Pct_Match`, `Overlap_bp` | *COI-5P.* BOLD BIN of the closest reference at or above the BIN assign threshold, its percent identity, and the alignment length. `NA` if no reference qualifies. |
 
 ---
 
