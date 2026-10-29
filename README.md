@@ -125,13 +125,15 @@ The parameters spreadsheet (`.xlsx`) has three tabs: `Instructions`, `UMIs and P
 |---|---|
 | **Plate** | Plate name/number (e.g., `Plate01`) |
 | **Well** | Well ID (e.g., `A01`) |
-| **Sample** | Sample name for this well |
+| **Sample** | Sample name for this well. Wells given the same sample name are pooled into one sample.  |
 | **Forward / Reverse UMI** | UMI sequence for this well, 5'→3' as on the primer oligos. The Reverse UMI is written as on the reverse primer, i.e. reverse-complemented relative to how it appears at the end of a read in the forward-primer orientation |
 | **Forward / Reverse Primer Name** | Must match a name defined in the persistent `dictionary_BIP.tsv` file or specified in the `Dictionary Update` tab |
 | **Negative Control** | `yes`, `y` or `1` (any case) marks a negative-control well; anything else, including blank, is a sample. The header only needs to start with `Negative Control`, e.g. `Negative Control (yes/y/1)`. Taxonomy in control rows is ignored |
 | **Kingdom … Species** | Optional expected taxonomy, used to greatly aid barcode inference. Use the same names as your reference library, since a name that differs from the library's at an enforced rank (Kingdom down to `--min_rank_match`, default Order) is scored as a mismatch and the OTU cannot be the target. Leave a rank blank if the names differ |
 
-**Negative controls change the outputs.** Before barcode inference, every OTU in a control well is treated as a contaminant: same-plate OTUs that match it (≥99% identity over the whole alignment) lose its read count, and any left below `--minreads` are removed. Control-well OTUs are then left out of `OTUDetails.tsv` and the FASTA files and listed in `ControlContaminants.tsv` instead (see [Outputs](#outputs)).
+***Note: Negative controls change the outputs.*** Before barcode inference, every OTU in a control well is treated as a contaminant: same-plate OTUs that match it (≥99% identity over the whole alignment) lose its read count, and any left below `--minreads` are removed. Control-well OTUs are then left out of `OTUDetails.tsv` and the FASTA files and listed in `ControlContaminants.tsv` instead (see [Outputs](#outputs)).
+
+A control name used on more than one plate (e.g. `NC` on every plate) is renamed per plate, to `NC_Plate01`, `NC_Plate02` and so on, so each plate is checked against its own control, and BIP prints a NOTE when it does this. If a renamed control would clash with an existing sample name, the run stops and asks you to give each plate's control a unique name.
 
 ### Dictionary Update (one row per primer pair)
 
@@ -160,7 +162,7 @@ A handful of parameters (UMI/primer overlap minimums, per-base error tolerances,
 | `--fastq` | *(working directory)* | Folder holding the input `.fastq.gz`/`.fastq` files. Reads in a separate folder are never modified. |
 | `--params` | *(working directory)* | The parameters `.xlsx` file, or a folder holding exactly one. |
 | `--min_rank_match` | `o` | Rank down to which the expected taxonomy is enforced: `k`, `p`, `c`, `o`, `f`, `g` or `s` (or the rank name). A mismatch at this rank or above stops an OTU being the target; lower ranks only break ties. |
-| `--parallel_sintax` | `FALSE` | `FALSE` runs SINTAX on one thread with a fixed seed, so taxonomy and probabilities are reproducible. `TRUE` uses all cores and is faster (roughly 2× for the taxonomy step) but results can vary slightly between runs. Recorded in `publication_metrics.txt`. |
+| `--parallel_sintax` | `FALSE` | `FALSE` runs SINTAX on one thread with a fixed seed, so taxonomy and probabilities are reproducible. `TRUE` uses all cores and is faster (roughly 2× for the taxonomy step) but results can vary slightly between runs. |
 | `--scripts` | `/BIP/SCRIPTS` | Directory containing `BIP.sh`'s companion `bip1`-`bip4` R/Python scripts. |
 | `--refs` | `/BIP/REFS` | Reference library directory - searched for both the SINTAX taxonomy reference and the error-correction reference (`reference_seqs_*.fasta`). |
 | `--ref_seq_corr` | *(auto-detect)* | Explicit path to the error-correction reference FASTA. Leave unset to auto-detect the single `reference_seqs_*.fasta` in `--refs`. |
